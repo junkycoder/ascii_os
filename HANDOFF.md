@@ -1,5 +1,4 @@
 # HANDOFF — acii_os
-<!-- gh PR workflow nácvik 2026-05-30 -->
 
 Session handoff. Context was running low; this captures everything needed to
 continue cleanly.
