@@ -1,0 +1,26 @@
+{
+  "name": "cz-fakan-os",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "acii_os packaged as a native iOS app (cz.fakan.os) via Capacitor. The web stays zero-dependency, no-build vanilla ES modules; Capacitor is only a native wrapper.",
+  "scripts": {
+    "dev": "python3 .claude/devserver.py 8765 0.0.0.0",
+    "build": "node tools/build-www.mjs",
+    "copy": "npm run build && npx cap copy ios",
+    "sync": "npm run build && npx cap sync ios",
+    "ios:add": "npx cap add ios",
+    "ios:open": "npx cap open ios"
+  },
+  "dependencies": {
+    "@capacitor/app": "^6.0.0",
+    "@capacitor/core": "^6.0.0",
+    "@capacitor/ios": "^6.0.0",
+    "@capacitor/keyboard": "^6.0.0",
+    "@capacitor/splash-screen": "^6.0.0",
+    "@capacitor/status-bar": "^6.0.0"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "^6.0.0"
+  }
+}
