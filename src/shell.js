@@ -17,9 +17,18 @@ import { signal, effect } from './signals.js';
 import { createWindowManager } from './wm.js';
 import { createFS } from './fs.js';
 import { createContextMenu } from './ui-menu.js';
+import { createMusicPlayer } from './music.js';
 
 // Shared FS singleton — used by Paint, Finder, and Shell (desktop icons).
 const fs = globalThis.__aciiFS ||= createFS({ storageKey: 'acii.fs.v1' });
+
+// Per-instance music players for the 'music' widget, keyed by widget id.
+const musicPlayers = new Map();
+function getMusicPlayer(id) {
+  let p = musicPlayers.get(id);
+  if (!p) { p = createMusicPlayer(fs); musicPlayers.set(id, p); }
+  return p;
+}
 
 const STORAGE_KEY = 'acii.shell.v2';
 
@@ -104,6 +113,60 @@ const WIDGETS = {
         }
       }
       if (line && yy < ctx.height - 1) ctx.text(1, yy, line, { fg: c.fg });
+    },
+  },
+  music: {
+    defaultSize: { w: 26, h: 6 },
+    label: 'music',
+    render(ctx, w) {
+      const c = ctx.theme.peek().colors;
+      const p = getMusicPlayer(w.id);
+      const st = p.state();
+      const W = ctx.width, H = ctx.height;
+      ctx.box(0, 0, W, H, { fg: c.accent, glyphSet: 'borderRound' });
+      ctx.text(1, 0, ' music ', { fg: c.accent });
+
+      // Source toggle button (top-right): [ disk ] / [radio]
+      const src = st.mode === 'disk' ? '[ disk ]' : '[radio]';
+      const srcX = Math.max(8, W - src.length - 1);
+      ctx.text(srcX, 0, src, { fg: c.fgDim });
+
+      // Track / station name (or error).
+      const name = (st.error ? '! ' + st.error : st.label).slice(0, W - 2);
+      ctx.text(1, 1, name, { fg: st.error ? c.warning : c.fg, bold: !st.error });
+      // Position.
+      const pos = st.count
+        ? `${st.mode === 'disk' ? 'track' : 'station'} ${st.idx + 1}/${st.count}`
+        : (st.mode === 'disk' ? 'drop audio on the desktop' : 'no stations');
+      ctx.text(1, 2, pos.slice(0, W - 2), { fg: c.fgDim });
+
+      // Transport buttons: [<]  [>|=]  [»]   (play shows [=] while playing)
+      const cy = H - 2;
+      const prev = '[<]', play = st.playing ? '[=]' : '[>]', next = '[»]';
+      const px = Math.max(1, Math.floor((W - (prev.length + play.length + next.length + 4)) / 2));
+      const playX = px + prev.length + 2;
+      const nextX = playX + play.length + 2;
+      ctx.text(px, cy, prev, { fg: c.accent, bold: true });
+      ctx.text(playX, cy, play, { fg: st.playing ? c.success : c.accent, bold: true });
+      ctx.text(nextX, cy, next, { fg: c.accent, bold: true });
+
+      // Stash clickable hit-zones for onClick (local coords).
+      w._mctrl = { srcX, srcW: src.length, cy, prevX: px, prevW: prev.length,
+                   playX, playW: play.length, nextX, nextW: next.length };
+    },
+    // Clicks on controls (local coords). Returns true when handled so the
+    // shell doesn't start a drag.
+    onClick(lx, ly, w) {
+      const p = getMusicPlayer(w.id);
+      const m = w._mctrl;
+      if (!m) return false;
+      if (ly === 0 && lx >= m.srcX && lx < m.srcX + m.srcW) { p.toggleMode(); return true; }
+      if (ly === m.cy) {
+        if (lx >= m.prevX && lx < m.prevX + m.prevW) { p.prev(); return true; }
+        if (lx >= m.playX && lx < m.playX + m.playW) { p.toggle(); return true; }
+        if (lx >= m.nextX && lx < m.nextX + m.nextW) { p.next(); return true; }
+      }
+      return false;
     },
   },
 };
@@ -547,6 +610,8 @@ export function createShell(engine, opts = {}) {
     return w;
   }
   function removeWidget(id) {
+    const mp = musicPlayers.get(id);
+    if (mp) { try { mp.destroy(); } catch {} musicPlayers.delete(id); }
     widgets.value = widgets.peek().filter(w => w.id !== id);
     bumpSave();
   }
@@ -941,6 +1006,12 @@ export function createShell(engine, opts = {}) {
 
         const widget = widgetHitTest(e.x, e.y);
         if (widget) {
+          // Interactive widgets (music) get first crack at the click; if a
+          // control was hit, don't start a drag.
+          const spec = WIDGETS[widget.type];
+          if (spec && spec.onClick) {
+            try { if (spec.onClick(e.x - widget.x, e.y - widget.y, widget)) return; } catch {}
+          }
           widgets.value = [...widgets.peek().filter(x => x.id !== widget.id), widget];
           deskDrag = { kind: 'widget', target: widget.id, ox: e.x, oy: e.y, baseX: widget.x, baseY: widget.y, moved: false };
           return;
@@ -1001,6 +1072,14 @@ export function createShell(engine, opts = {}) {
     if (e.type === 'tap' && !pointInAnyWindow(e.x, e.y)) {
       const closing = widgetCloseHit(e.x, e.y);
       if (closing) { removeWidget(closing.id); return; }
+      // Tap on an interactive widget's controls (music transport).
+      const widget = widgetHitTest(e.x, e.y);
+      if (widget) {
+        const spec = WIDGETS[widget.type];
+        if (spec && spec.onClick) {
+          try { if (spec.onClick(e.x - widget.x, e.y - widget.y, widget)) return; } catch {}
+        }
+      }
     }
     // Long-press → context menu (matches mobile OS convention).
     // Touch-drag for moving icons: just touch+move directly (without longpress).
