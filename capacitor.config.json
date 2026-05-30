@@ -1,0 +1,20 @@
+{
+  "appId": "cz.fakan.os",
+  "appName": "fakan.os",
+  "webDir": "www",
+  "backgroundColor": "#000000",
+  "ios": {
+    "contentInset": "always",
+    "backgroundColor": "#000000"
+  },
+  "plugins": {
+    "SplashScreen": {
+      "launchAutoHide": false,
+      "backgroundColor": "#000000",
+      "showSpinner": false
+    },
+    "Keyboard": {
+      "resize": "none"
+    }
+  }
+}
