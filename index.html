@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="cs">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no" />
+<meta name="theme-color" content="#0a0a0a" />
+<title>acii_os</title>
+<style>
+  html, body {
+    margin: 0; padding: 0; height: 100%; background: #000; overflow: hidden;
+    -webkit-user-select: none; user-select: none;
+    -webkit-tap-highlight-color: transparent;
+    overscroll-behavior: none; touch-action: none;
+    font-family: system-ui, sans-serif;
+  }
+  #app { width: 100vw; height: 100vh; display: grid; place-items: stretch; }
+
+  .acii-root {
+    background: var(--acii-bg, #000);
+    color: var(--acii-fg, #ddd);
+    font-family: var(--acii-font, monospace);
+    font-size: var(--acii-size, 16px);
+    line-height: 1;
+    padding: 0;
+    outline: none;
+    /* No selection by default — drag is reserved for window manager.
+       Dbl-click / triple-click / shift-click still select for copy. */
+    -webkit-user-select: none;
+    user-select: none;
+    cursor: default;
+    width: 100%; height: 100%;
+    box-sizing: border-box;
+  }
+  /* Allow text selection inside elements that opt in (e.g. focused
+     text inputs / terminal output) — not used yet, future hook. */
+  .acii-root[data-select="on"] { user-select: text; -webkit-user-select: text; }
+  .acii-grid { display: block; }
+  .acii-row {
+    display: block;
+    white-space: pre;
+    height: var(--acii-size, 16px);
+    line-height: var(--acii-size, 16px);
+  }
+  .acii-cell {
+    display: inline-block;
+    width: calc(var(--acii-size, 16px) * var(--acii-aspect, 0.6));
+    height: var(--acii-size, 16px);
+    line-height: var(--acii-size, 16px);
+    text-align: center;
+    vertical-align: top;
+  }
+
+  .boot {
+    position: fixed; inset: 0; display: grid; place-items: center;
+    background: #000; color: #33ff66;
+    font: 14px/1.5 ui-monospace, monospace; z-index: 100;
+    transition: opacity .3s ease; pointer-events: none;
+  }
+  .boot.hidden { opacity: 0; }
+</style>
+</head>
+<body>
+  <div id="app"></div>
+  <div class="boot" id="boot">acii_os booting…</div>
+
+  <script type="module">
+    // Cache-bust all module imports per page load. The dev server sends
+    // no-store, but Chromium's ESM module map can keep stale modules
+    // across navigations on the same origin — query bust guarantees fresh.
+    const V = '?v=' + Date.now();
+    const [
+      { createEngine, signal, effect, themes },
+      { createShell },
+      { createApp: createTerminal },
+      { createApp: createSnake },
+      { createApp: createNotes },
+      { createApp: createPaint },
+      { createApp: createReadme },
+      { createApp: createFinder },
+      { createApp: createVideo },
+      { createApp: createGameMaker },
+    ] = await Promise.all([
+      import('./src/engine.js' + V),
+      import('./src/shell.js' + V),
+      import('./src/apps/terminal.js' + V),
+      import('./src/apps/snake.js' + V),
+      import('./src/apps/notes.js' + V),
+      import('./src/apps/paint.js' + V),
+      import('./src/apps/readme.js' + V),
+      import('./src/apps/finder.js' + V),
+      import('./src/apps/video.js' + V),
+      import('./src/apps/gamemaker.js' + V),
+    ]);
+
+    // ── Auto-size grid to viewport ──
+    function computeGrid() {
+      const fontSize = window.innerWidth < 500 ? 14 : 16;
+      const aspect = 0.6;
+      const cellW = fontSize * aspect;
+      const cols = Math.max(20, Math.floor(window.innerWidth / cellW));
+      const rows = Math.max(8, Math.floor(window.innerHeight / fontSize));
+      return { cols, rows, fontSize };
+    }
+
+    const { cols, rows, fontSize } = computeGrid();
+    const initialTheme = themes['default-dark'];
+    initialTheme.font.size = fontSize;
+
+    const engine = createEngine({
+      target: '#app',
+      cols, rows,
+      theme: initialTheme,
+      fps: 30,
+    });
+
+    // App registry
+    const appRegistry = [
+      { id: 'readme',    label: 'README',    icon: '[?]', factory: createReadme },
+      { id: 'finder',    label: 'Finder',    icon: '[▸]', factory: createFinder },
+      { id: 'terminal',  label: 'Terminal',  icon: '[$]', factory: createTerminal },
+      { id: 'notes',     label: 'Notes',     icon: '[≡]', factory: createNotes },
+      { id: 'paint',     label: 'Paint',     icon: '[✎]', factory: createPaint },
+      { id: 'video',     label: 'Video',     icon: '[▶]', factory: createVideo },
+      { id: 'gamemaker', label: 'GameMaker', icon: '[♛]', factory: createGameMaker },
+      { id: 'snake',     label: 'Snake',     icon: '[●]', factory: createSnake },
+    ];
+
+    const shell = createShell(engine, {
+      apps: appRegistry,
+      background: 'dots',
+      taskbarPosition: 'bottom',
+    });
+
+    engine.onFrame(() => shell.render());
+    engine.start();
+
+    // ── Responsive resize ──
+    let resizeT = null;
+    window.addEventListener('resize', () => {
+      if (resizeT) clearTimeout(resizeT);
+      resizeT = setTimeout(() => {
+        const g = computeGrid();
+        engine.theme.value = { ...engine.theme.peek(), font: { ...engine.theme.peek().font, size: g.fontSize } };
+        engine.resize(g.cols, g.rows);
+      }, 100);
+    });
+
+    // ── Hide boot screen once loop ticks ──
+    setTimeout(() => {
+      document.getElementById('boot').classList.add('hidden');
+    }, 200);
+
+    // First-run: open README so the user has something to read
+    if (shell.running.size === 0) {
+      setTimeout(() => shell.openApp('readme'), 50);
+    }
+
+    // expose
+    window.engine = engine;
+    window.shell = shell;
+    window.themes = themes;
+  </script>
+</body>
+</html>

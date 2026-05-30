@@ -1,0 +1,1164 @@
+// acii_os shell — desktop / launcher built on top of engine + wm + apps.
+//
+// Wires:
+//   - background (themed pattern)
+//   - app registry → desktop icons → openable windows
+//   - taskbar with running apps
+//   - input routing: keys + mouse → focused window's app
+//   - responsive mode: watch/mobile = single fullscreen, tablet+ = floating WM
+//   - persistence: icon positions + open windows + theme to localStorage
+//
+// Public API:
+//   const shell = createShell(engine, { apps, background?, persist? })
+//   shell.openApp(id), shell.closeApp(id), shell.cycleTheme()
+//   call shell inside engine.onFrame() — it manages WM render + background.
+
+import { signal, effect } from './signals.js';
+import { createWindowManager } from './wm.js';
+import { createFS } from './fs.js';
+import { createContextMenu } from './ui-menu.js';
+
+// Shared FS singleton — used by Paint, Finder, and Shell (desktop icons).
+const fs = globalThis.__aciiFS ||= createFS({ storageKey: 'acii.fs.v1' });
+
+const STORAGE_KEY = 'acii.shell.v2';
+
+const PATTERNS = {
+  dots:   { ch: '·', spacing: 4 },
+  grid:   { ch: '+', spacing: 6 },
+  scan:   { ch: '─', spacing: 3 },
+  blank:  null,
+};
+
+// Icon dimensions: 4-row tile (3-row box + 1-row label).
+const ICON_W = 6;
+const ICON_H = 4;
+
+// Built-in widgets — pinned panels on the desktop. Each renders into a
+// sub-context. Spec: { defaultSize: {w, h}, render(ctx, widget) }.
+const WIDGETS = {
+  clock: {
+    defaultSize: { w: 12, h: 4 },
+    label: 'clock',
+    render(ctx) {
+      const c = ctx.theme.peek().colors;
+      ctx.box(0, 0, ctx.width, ctx.height, { fg: c.border, glyphSet: 'borderRound' });
+      const now = new Date();
+      const hh = String(now.getHours()).padStart(2, '0');
+      const mm = String(now.getMinutes()).padStart(2, '0');
+      const ss = String(now.getSeconds()).padStart(2, '0');
+      const time = `${hh}:${mm}:${ss}`;
+      const tx = Math.max(1, Math.floor((ctx.width - time.length) / 2));
+      ctx.text(tx, 1, time, { fg: c.accent, bold: true });
+      if (ctx.height >= 4) {
+        // ISO date: YYYY-MM-DD (10 chars, fits w=12 with borders)
+        const yyyy = now.getFullYear();
+        const mo = String(now.getMonth() + 1).padStart(2, '0');
+        const dd = String(now.getDate()).padStart(2, '0');
+        const date = `${yyyy}-${mo}-${dd}`;
+        const dx = Math.max(1, Math.floor((ctx.width - date.length) / 2));
+        ctx.text(dx, 2, date.slice(0, ctx.width - 2), { fg: c.fgDim });
+      }
+    },
+  },
+  stats: {
+    defaultSize: { w: 16, h: 7 },
+    label: 'stats',
+    render(ctx, w, env) {
+      const c = ctx.theme.peek().colors;
+      ctx.box(0, 0, ctx.width, ctx.height, { fg: c.border });
+      ctx.text(1, 0, ' stats ', { fg: c.fgDim });
+      const rows = [
+        ['fps ', String(env.fps)],
+        ['cols', String(env.cols)],
+        ['rows', String(env.rows)],
+        ['mode', env.mode],
+        ['thm ', env.theme],
+      ];
+      for (let i = 0; i < rows.length && i < ctx.height - 2; i++) {
+        ctx.text(1, 1 + i, rows[i][0], { fg: c.fgDim });
+        ctx.text(6, 1 + i, rows[i][1].slice(0, ctx.width - 7), { fg: c.accent });
+      }
+    },
+  },
+  note: {
+    defaultSize: { w: 24, h: 6 },
+    label: 'note',
+    render(ctx, w) {
+      const c = ctx.theme.peek().colors;
+      ctx.box(0, 0, ctx.width, ctx.height, { fg: c.warning, glyphSet: 'borderRound' });
+      ctx.text(1, 0, ' note ', { fg: c.warning });
+      const text = w.config?.text || 'sticky note — drag to move';
+      // Simple word wrap.
+      const words = String(text).split(/\s+/);
+      let line = '';
+      let yy = 1;
+      for (const word of words) {
+        const next = line ? line + ' ' + word : word;
+        if (next.length > ctx.width - 2) {
+          if (line) ctx.text(1, yy++, line, { fg: c.fg });
+          line = word;
+          if (yy >= ctx.height - 1) break;
+        } else {
+          line = next;
+        }
+      }
+      if (line && yy < ctx.height - 1) ctx.text(1, yy, line, { fg: c.fg });
+    },
+  },
+};
+
+export function createShell(engine, opts = {}) {
+  const apps = opts.apps || [];
+  const persist = opts.persist !== false;
+  const taskbarPos = signal(opts.taskbarPosition || 'bottom'); // bottom|top|hidden
+  const backgroundKind = signal(opts.background || 'dots');
+
+  const wm = createWindowManager(engine);
+
+  // Map: appId -> { app spec, instance(s)?, win }
+  const running = new Map(); // winId -> { spec, instance, win }
+  const iconPositions = new Map(); // appId -> { x, y }
+  const widgets = signal([]); // [{ id, type, x, y, w, h, config }]
+  let _widgetSeq = 1;
+
+  // Wallpaper: path to a paint file in FS, or null for pattern background.
+  const wallpaperPath = signal(null);
+
+  // Active context menu (single at a time). Closed on outside click.
+  const activeMenu = signal(null);
+
+  // File icon positions: filename → { x, y }
+  const fileIconPos = new Map();
+
+  // Drag state for icons / widgets (separate from WM's window drag).
+  // shape: { kind: 'icon'|'widget'|'file', target, ox, oy, baseX, baseY, moved }
+  let deskDrag = null;
+
+  // ── Persistence ─────────────────────────────────────────────────
+  function load() {
+    if (!persist) return null;
+    try {
+      const raw = localStorage.getItem(STORAGE_KEY);
+      if (!raw) return null;
+      return JSON.parse(raw);
+    } catch { return null; }
+  }
+  function save() {
+    if (!persist) return;
+    const state = {
+      theme: engine.theme.peek().name,
+      background: backgroundKind.peek(),
+      taskbarPosition: taskbarPos.peek(),
+      icons: Object.fromEntries(iconPositions),
+      widgets: widgets.peek().map(w => ({ id: w.id, type: w.type, x: w.x, y: w.y, w: w.w, h: w.h, config: w.config || null })),
+      wallpaperPath: wallpaperPath.peek(),
+      fileIcons: Object.fromEntries(fileIconPos),
+      windows: [...running.values()].map(({ spec, win }) => ({
+        appId: spec.id,
+        x: win.x.peek(), y: win.y.peek(),
+        w: win.w.peek(), h: win.h.peek(),
+        maximized: win.maximized.peek(),
+      })),
+    };
+    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); } catch {}
+  }
+  const saved = load();
+  if (saved) {
+    if (saved.theme && engine.themes[saved.theme]) {
+      engine.theme.value = engine.themes[saved.theme];
+    }
+    if (saved.background) backgroundKind.value = saved.background;
+    if (saved.taskbarPosition) taskbarPos.value = saved.taskbarPosition;
+    if (saved.icons) for (const [k, v] of Object.entries(saved.icons)) iconPositions.set(k, v);
+    if (saved.fileIcons) for (const [k, v] of Object.entries(saved.fileIcons)) fileIconPos.set(k, v);
+    if (saved.wallpaperPath) wallpaperPath.value = saved.wallpaperPath;
+    if (saved.widgets?.length) {
+      widgets.value = saved.widgets.map(w => ({ ...w, id: w.id || `wd-${_widgetSeq++}` }));
+      const maxId = Math.max(0, ...saved.widgets.map(w => {
+        const m = /^wd-(\d+)$/.exec(w.id || ''); return m ? +m[1] : 0;
+      }));
+      _widgetSeq = maxId + 1;
+    }
+  }
+
+  // Save when state changes (debounced)
+  let saveT = null;
+  function bumpSave() {
+    if (saveT) clearTimeout(saveT);
+    saveT = setTimeout(save, 300);
+  }
+
+  // ── Icon layout ─────────────────────────────────────────────────
+  // Default grid: left column on wide screens, grid on narrow.
+  // Each icon is ICON_W × ICON_H cells; spacing 1 cell.
+  function defaultIconPos(appIdx) {
+    const isWide = engine.cols.peek() >= 60;
+    const slotH = ICON_H + 1; // 1 row gap between icons
+    const slotW = ICON_W + 2;
+    if (isWide) {
+      return { x: 2, y: 1 + appIdx * slotH };
+    } else {
+      const perRow = Math.max(1, Math.floor((engine.cols.peek() - 2) / slotW));
+      return {
+        x: 2 + (appIdx % perRow) * slotW,
+        y: 1 + Math.floor(appIdx / perRow) * slotH,
+      };
+    }
+  }
+  function iconPos(appId, appIdx) {
+    if (iconPositions.has(appId)) return iconPositions.get(appId);
+    const p = defaultIconPos(appIdx);
+    iconPositions.set(appId, p);
+    return p;
+  }
+
+  // ── App lifecycle ───────────────────────────────────────────────
+  let _winSeq = 1;
+
+  function openApp(appId, geom) {
+    const spec = apps.find(a => a.id === appId);
+    if (!spec) return null;
+    const mode = engine.mode.peek();
+    // On watch/mobile: only one window at a time — close others.
+    if (mode === 'watch' || mode === 'mobile') {
+      for (const r of [...running.values()]) closeWindow(r.win);
+    }
+
+    const cols = engine.cols.peek();
+    const rows = engine.rows.peek();
+    const tbH = taskbarPos.peek() === 'hidden' ? 0 : 1;
+
+    let x, y, w, h, maximized;
+    if (mode === 'watch') {
+      x = 0; y = 0; w = cols; h = rows; maximized = true;
+    } else if (mode === 'mobile') {
+      x = 0; y = 0; w = cols; h = rows - tbH; maximized = true;
+    } else {
+      // Floating defaults: try to use saved geom or default
+      const defaultW = Math.min(50, cols - 8);
+      const defaultH = Math.min(20, rows - 6);
+      x = geom?.x ?? (4 + ((_winSeq * 3) % Math.max(1, cols - defaultW - 4)));
+      y = geom?.y ?? (2 + ((_winSeq * 2) % Math.max(1, rows - defaultH - 4)));
+      w = geom?.w ?? defaultW;
+      h = geom?.h ?? defaultH;
+      maximized = geom?.maximized || false;
+    }
+    _winSeq++;
+
+    // Lazy app instantiation on first body call (so initialCtx is real).
+    let inst = null;
+    const win = wm.addWindow({
+      title: spec.label,
+      x, y, w, h, maximized,
+      resizable: true, closable: true, maximizable: true,
+      body: (ctx, w_) => {
+        if (!inst) {
+          try { inst = spec.factory(ctx, w_); }
+          catch (err) {
+            ctx.text(0, 0, '[app init error]', { fg: ctx.theme.peek().colors.error, bold: true });
+            ctx.text(0, 1, String(err?.message || err).slice(0, ctx.width), { fg: ctx.theme.peek().colors.error });
+            return;
+          }
+          // Store instance on the registered record
+          const rec = running.get(win.id);
+          if (rec) rec.instance = inst;
+        }
+        try { inst.render(ctx); }
+        catch (err) {
+          ctx.text(0, 0, '[render error]', { fg: ctx.theme.peek().colors.error, bold: true });
+          ctx.text(0, 1, String(err?.message || err).slice(0, ctx.width), { fg: ctx.theme.peek().colors.error });
+        }
+      },
+      onClose: () => {
+        const rec = running.get(win.id);
+        if (rec?.instance?.destroy) {
+          try { rec.instance.destroy(); } catch {}
+        }
+        running.delete(win.id);
+        bumpSave();
+      },
+    });
+    running.set(win.id, { spec, instance: null, win });
+    win.focus();
+    bumpSave();
+    return win;
+  }
+
+  function closeWindow(win) { win.close(); }
+
+  function closeApp(appId) {
+    for (const r of [...running.values()]) if (r.spec.id === appId) r.win.close();
+  }
+
+  // Persist on geometry changes
+  effect(() => {
+    // Touch all window signals so we re-run on change.
+    for (const r of running.values()) {
+      r.win.x.value; r.win.y.value; r.win.w.value; r.win.h.value; r.win.maximized.value;
+    }
+    bumpSave();
+  });
+  effect(() => { engine.theme.value; bumpSave(); });
+
+  // ── Background ──────────────────────────────────────────────────
+  // Wallpaper: parse a /desktop/*.acii paint file and tile/center it.
+  // Format (from paint.js): first line "# acii-paint v1 WxH", then H rows
+  // of "<char><colorName>|..." separated by '|'.
+  // Decode paint-file color tags: '<colorChar><styleChar>' (e.g. 'a1' = accent bold).
+  const PAINT_CODE_COLOR = { a: 'accent', f: 'fg', e: 'error', w: 'warning', s: 'success', l: 'link', d: 'fgDim' };
+  function parsePaintFile(text) {
+    if (!text) return null;
+    const lines = text.split('\n');
+    const head = lines[0] || '';
+    const m = /^#\s*acii-paint\s+v1\s+(\d+)x(\d+)/i.exec(head);
+    if (!m) return null;
+    const W = +m[1], H = +m[2];
+    const cells = [];
+    for (let y = 0; y < H; y++) {
+      const row = [];
+      const parts = (lines[1 + y] || '').split('|');
+      for (let x = 0; x < W; x++) {
+        const tok = parts[x] || ' f0';
+        const ch = tok.length >= 2 ? tok.slice(0, tok.length - 2) : ' ';
+        const tag = tok.length >= 2 ? tok.slice(-2) : 'f0';
+        const color = PAINT_CODE_COLOR[tag[0]] || 'fg';
+        const bold = tag[1] === '1';
+        row.push({ ch: ch || ' ', color, bold });
+      }
+      cells.push(row);
+    }
+    return { W, H, cells };
+  }
+
+  function renderBackground() {
+    const t = engine.theme.peek();
+    const c = t.colors;
+    const cols = engine.cols.peek();
+    const rows = engine.rows.peek();
+    engine.rect(0, 0, cols, rows, { ch: ' ', fg: c.fg, bg: c.bg });
+
+    // Wallpaper from paint file?
+    const wp = wallpaperPath.peek();
+    if (wp && fs.exists(wp)) {
+      const text = fs.readText(wp);
+      const pic = parsePaintFile(text);
+      if (pic) {
+        const ox = Math.max(0, Math.floor((cols - pic.W) / 2));
+        const oy = Math.max(0, Math.floor((rows - pic.H) / 2));
+        for (let y = 0; y < pic.H; y++) {
+          for (let x = 0; x < pic.W; x++) {
+            const cell = pic.cells[y][x];
+            if (cell.ch === ' ') continue;
+            const fg = c[cell.color] || c.fg;
+            engine.put(ox + x, oy + y, cell.ch, { fg, bold: !!cell.bold });
+          }
+        }
+        return;
+      }
+    }
+
+    // Pattern fallback
+    const kind = backgroundKind.peek();
+    const pat = PATTERNS[kind];
+    if (!pat) return;
+    for (let y = 0; y < rows; y += pat.spacing) {
+      for (let x = 0; x < cols; x += pat.spacing) {
+        engine.put(x, y, pat.ch, { fg: c.border });
+      }
+    }
+  }
+
+  // ── Desktop icons ───────────────────────────────────────────────
+  // Icon layout (ICON_W=6, ICON_H=4):
+  //   ╭────╮     row 0
+  //   │ $  │     row 1   (glyph char from app.icon — first non-bracket char)
+  //   ╰────╯     row 2
+  //    Term      row 3   (label)
+  function glyphFromIcon(raw) {
+    if (!raw) return '?';
+    // Take the first non-bracket / non-space char.
+    for (const ch of raw) if (!'[](){}<> '.includes(ch)) return ch;
+    return raw[0];
+  }
+
+  function renderIcons() {
+    if (engine.mode.peek() === 'watch') return; // no icons on watch
+    if (running.size > 0 && engine.mode.peek() === 'mobile') return;
+
+    const t = engine.theme.peek();
+    const c = t.colors;
+    const g = t.glyphs.borderRound;
+
+    apps.forEach((app, i) => {
+      const { x, y } = iconPos(app.id, i);
+      const isDragging = deskDrag?.kind === 'icon' && deskDrag.target === app.id;
+      const fg = isDragging ? c.borderFocus : c.accent;
+      const labelFg = isDragging ? c.borderFocus : c.fg;
+
+      // Top border
+      engine.text(x, y, g.tl + g.h.repeat(ICON_W - 2) + g.tr, { fg });
+      // Middle row with glyph centered
+      const glyph = glyphFromIcon(app.icon);
+      engine.put(x, y + 1, g.v, { fg });
+      engine.text(x + 1, y + 1, ' '.repeat(ICON_W - 2), { fg });
+      const gx = x + Math.floor(ICON_W / 2) - 1;
+      engine.put(gx, y + 1, glyph, { fg: c.accent, bold: true });
+      engine.put(x + ICON_W - 1, y + 1, g.v, { fg });
+      // Bottom border
+      engine.text(x, y + 2, g.bl + g.h.repeat(ICON_W - 2) + g.br, { fg });
+      // Label centered under box
+      const rawLabel = (app.label || app.id);
+      const labelMaxW = ICON_W;
+      const label = rawLabel.length > labelMaxW
+        ? rawLabel.slice(0, labelMaxW - 1) + '…'
+        : rawLabel;
+      const lx = x + Math.floor((ICON_W - label.length) / 2);
+      engine.text(lx, y + 3, label, { fg: labelFg });
+    });
+  }
+
+  function iconHitTest(px, py) {
+    for (let i = 0; i < apps.length; i++) {
+      const app = apps[i];
+      const { x, y } = iconPos(app.id, i);
+      if (px >= x && px < x + ICON_W && py >= y && py < y + ICON_H) return app;
+    }
+    return null;
+  }
+
+  // ── Desktop file icons (from /desktop/ in shared FS) ────────────
+  function extGlyph(name) {
+    const ext = name.toLowerCase().split('.').pop();
+    return ({
+      acii: '✎',  txt: 'T',  md: 'M',
+      json: '{}', html: '<>', js: 'JS',
+      mp3: '♪',  wav: '♪',  mp4: '▶', mov: '▶',
+      png: '🖼', jpg: '🖼', jpeg: '🖼',
+    })[ext] || '·';
+  }
+
+  function listDesktopFiles() {
+    if (!fs.exists('/desktop')) return [];
+    return fs.list('/desktop').filter(f => f.type === 'file');
+  }
+
+  function defaultFileIconPos(fileIdx) {
+    // Files go in a column to the RIGHT of app icons.
+    const isWide = engine.cols.peek() >= 60;
+    const slotH = ICON_H + 1;
+    if (isWide) {
+      return { x: 2 + (ICON_W + 2) + 4, y: 1 + fileIdx * slotH };
+    } else {
+      // Below apps in narrow mode
+      const appsHeight = 1 + apps.length * slotH;
+      return { x: 2, y: appsHeight + 1 + fileIdx * slotH };
+    }
+  }
+
+  function fileIcon(name, fileIdx) {
+    if (fileIconPos.has(name)) return fileIconPos.get(name);
+    const p = defaultFileIconPos(fileIdx);
+    fileIconPos.set(name, p);
+    return p;
+  }
+
+  function renderFileIcons() {
+    if (engine.mode.peek() === 'watch') return;
+    if (running.size > 0 && engine.mode.peek() === 'mobile') return;
+
+    const t = engine.theme.peek();
+    const c = t.colors;
+    const g = t.glyphs.borderRound;
+    const files = listDesktopFiles();
+
+    files.forEach((f, i) => {
+      const { x, y } = fileIcon(f.name, i);
+      const isDragging = deskDrag?.kind === 'file' && deskDrag.target === f.name;
+      const isWallpaper = wallpaperPath.peek() === '/desktop/' + f.name;
+      const fg = isDragging ? c.borderFocus
+              : isWallpaper ? c.warning
+              : c.accentDim;
+      // Box
+      engine.text(x, y, g.tl + g.h.repeat(ICON_W - 2) + g.tr, { fg });
+      engine.put(x, y + 1, g.v, { fg });
+      engine.text(x + 1, y + 1, ' '.repeat(ICON_W - 2), { fg });
+      const glyph = extGlyph(f.name);
+      const gx = x + Math.floor(ICON_W / 2) - 1;
+      engine.text(gx, y + 1, glyph.slice(0, 2), { fg: isWallpaper ? c.warning : c.fg, bold: true });
+      engine.put(x + ICON_W - 1, y + 1, g.v, { fg });
+      engine.text(x, y + 2, g.bl + g.h.repeat(ICON_W - 2) + g.br, { fg });
+      // Label — short filename without ext if possible
+      let label = f.name;
+      if (label.length > ICON_W) label = label.slice(0, ICON_W - 1) + '…';
+      const lx = x + Math.floor((ICON_W - label.length) / 2);
+      engine.text(lx, y + 3, label, { fg: c.fg });
+    });
+  }
+
+  function fileIconHitTest(px, py) {
+    const files = listDesktopFiles();
+    for (let i = 0; i < files.length; i++) {
+      const { x, y } = fileIcon(files[i].name, i);
+      if (px >= x && px < x + ICON_W && py >= y && py < y + ICON_H) {
+        return files[i];
+      }
+    }
+    return null;
+  }
+
+  // ── Widgets ─────────────────────────────────────────────────────
+  function addWidget(type, opts = {}) {
+    const spec = WIDGETS[type];
+    if (!spec) return null;
+    const w = {
+      id: opts.id || `wd-${_widgetSeq++}`,
+      type,
+      x: opts.x ?? 4,
+      y: opts.y ?? 4,
+      w: opts.w ?? spec.defaultSize.w,
+      h: opts.h ?? spec.defaultSize.h,
+      config: opts.config || null,
+    };
+    widgets.value = [...widgets.peek(), w];
+    bumpSave();
+    return w;
+  }
+  function removeWidget(id) {
+    widgets.value = widgets.peek().filter(w => w.id !== id);
+    bumpSave();
+  }
+
+  function renderWidgets() {
+    if (engine.mode.peek() === 'watch') return;
+    const env = {
+      fps: engine.fps.peek(),
+      cols: engine.cols.peek(),
+      rows: engine.rows.peek(),
+      mode: engine.mode.peek(),
+      theme: engine.theme.peek().name,
+    };
+    const c = engine.theme.peek().colors;
+    for (const w of widgets.peek()) {
+      const spec = WIDGETS[w.type];
+      if (!spec) continue;
+      const ctx = engine.subContext({ x: w.x, y: w.y, w: w.w, h: w.h });
+      const isDragging = deskDrag?.kind === 'widget' && deskDrag.target === w.id;
+      try { spec.render(ctx, w, env); }
+      catch (err) {
+        ctx.text(0, 0, '[widget error]', { fg: c.error });
+      }
+      // Highlight border when dragging
+      if (isDragging) {
+        engine.box(w.x, w.y, w.w, w.h, { fg: c.borderFocus, glyphSet: 'borderDouble' });
+      }
+      // Always-visible close × in top-right corner (replaces border glyph).
+      // Click it to remove the widget. See widgetCloseHit() / mousedown handler.
+      if (w.w >= 3) {
+        engine.put(w.x + w.w - 1, w.y, '×', { fg: c.error, bold: true });
+      }
+    }
+  }
+
+  function widgetHitTest(px, py) {
+    // Topmost (last in list) wins.
+    const list = widgets.peek();
+    for (let i = list.length - 1; i >= 0; i--) {
+      const w = list[i];
+      if (px >= w.x && px < w.x + w.w && py >= w.y && py < w.y + w.h) return w;
+    }
+    return null;
+  }
+
+  // Was the click on the widget's close × ? Returns widget if so.
+  function widgetCloseHit(px, py) {
+    const list = widgets.peek();
+    for (let i = list.length - 1; i >= 0; i--) {
+      const w = list[i];
+      // Generous hit zone: top-right cell + cell to its left (border).
+      if (py === w.y && (px === w.x + w.w - 1 || px === w.x + w.w - 2)) return w;
+    }
+    return null;
+  }
+
+  function pointInAnyWindow(px, py) {
+    for (const win of wm.windows.peek()) {
+      const x = win.x.peek(), y = win.y.peek();
+      if (px >= x && px < x + win.w.peek() && py >= y && py < y + win.h.peek()) return true;
+    }
+    return false;
+  }
+
+  // ── Taskbar ─────────────────────────────────────────────────────
+  function taskbarY() {
+    const pos = taskbarPos.peek();
+    if (pos === 'hidden') return -1;
+    if (pos === 'top') return 0;
+    return engine.rows.peek() - 1;
+  }
+  function renderTaskbar() {
+    const y = taskbarY();
+    if (y < 0) return;
+    const t = engine.theme.peek();
+    const cols = engine.cols.peek();
+    engine.rect(0, y, cols, 1, { ch: ' ', bg: t.colors.border });
+
+    // Left segment: brand + clock
+    const brand = ' acii_os ';
+    engine.text(0, y, brand, { fg: t.colors.bg, bg: t.colors.accent, bold: true });
+    let cur = brand.length + 1;
+
+    // Running app chips
+    for (const r of running.values()) {
+      const isFocused = r.win.focused.peek();
+      const chip = ` ${r.spec.icon || '[]'} ${r.spec.label} `;
+      const fg = isFocused ? t.colors.bg : t.colors.fg;
+      const bg = isFocused ? t.colors.accent : t.colors.bg;
+      if (cur + chip.length >= cols - 10) break;
+      engine.text(cur, y, chip, { fg, bg });
+      cur += chip.length + 1;
+    }
+
+    // Right: clock
+    const now = new Date();
+    const hh = String(now.getHours()).padStart(2, '0');
+    const mm = String(now.getMinutes()).padStart(2, '0');
+    const clock = ` ${hh}:${mm} `;
+    engine.text(cols - clock.length, y, clock, { fg: t.colors.fg, bg: t.colors.bg });
+  }
+
+  function taskbarHitTest(px, py) {
+    const y = taskbarY();
+    if (y < 0 || py !== y) return null;
+    let cur = ' acii_os '.length + 1;
+    for (const r of running.values()) {
+      const chip = ` ${r.spec.icon || '[]'} ${r.spec.label} `;
+      if (px >= cur && px < cur + chip.length) return { kind: 'chip', win: r.win };
+      cur += chip.length + 1;
+    }
+    return null;
+  }
+
+  // ── Hint banner (single line at top of mode info / shortcuts) ────
+  function renderHint() {
+    const mode = engine.mode.peek();
+    if (mode === 'watch') return;
+    const y = taskbarPos.peek() === 'top' ? 1 : 0;
+    const t = engine.theme.peek();
+    const hint = ` ${mode}  ·  Alt+Tab swap  ·  Ctrl+W close  ·  Esc unmax  ·  Ctrl+T theme  ·  Alt+W widget+  ·  fps ${engine.fps.peek()} `;
+    if (y === 0) {
+      engine.text(engine.cols.peek() - hint.length - 1, y, hint, { fg: t.colors.fgDim });
+    }
+  }
+
+  // ── Input routing ───────────────────────────────────────────────
+  // WM already handles drag/resize/focus via mousedown on its decoration.
+  // We handle: icon clicks, taskbar chips, and forward body events to focused app.
+
+  function openOrFocus(appId) {
+    const existing = [...running.values()].find(r => r.spec.id === appId);
+    if (existing) { existing.win.focus(); return existing.win; }
+    return openApp(appId);
+  }
+
+  // Open a file: routes to the right app by extension.
+  // Apps read `globalThis.__aciiOpenFile = path` on init/focus.
+  function appForExt(ext) {
+    switch ((ext || '').toLowerCase()) {
+      case 'acii':                                            return 'paint';
+      case 'mp4': case 'webm': case 'mov': case 'ogv':
+      case 'm4v': case 'avi':                                 return 'video';
+      case 'md':                                              return 'finder';   // Finder edits it
+      case 'txt': case 'json': case 'js': case 'html':
+      case 'css': case 'svg': case 'log': case 'csv':
+      case 'xml': case 'yml': case 'yaml':                    return 'finder';
+      default:                                                return 'finder';
+    }
+  }
+  function openFile(path) {
+    const ext = path.split('.').pop();
+    const target = appForExt(ext);
+    // Stash the path for the target app to pick up on first render.
+    globalThis.__aciiOpenFile = path;
+    const win = openOrFocus(target);
+    return win;
+  }
+
+  function setWallpaper(path) {
+    wallpaperPath.value = path;
+    bumpSave();
+  }
+  function clearWallpaper() {
+    wallpaperPath.value = null;
+    bumpSave();
+  }
+
+  // ── Context menu builders ───────────────────────────────────────
+  function menuForApp(app, x, y) {
+    return createContextMenu({
+      x, y,
+      items: [
+        { label: 'Open',       onSelect: () => openOrFocus(app.id), hotkey: 'O' },
+        { type: 'separator' },
+        { label: 'About app',  disabled: true },
+      ],
+      onClose: () => { activeMenu.value = null; },
+    });
+  }
+
+  function menuForFile(file, x, y) {
+    const path = '/desktop/' + file.name;
+    const isWp = wallpaperPath.peek() === path;
+    return createContextMenu({
+      x, y,
+      items: [
+        { label: 'Open',           onSelect: () => openFile(path), hotkey: 'O' },
+        { label: isWp ? 'Remove wallpaper' : 'Set as wallpaper',
+          onSelect: () => isWp ? clearWallpaper() : setWallpaper(path), hotkey: 'W' },
+        { type: 'separator' },
+        { label: 'Rename…',        onSelect: () => {
+            const next = window.prompt('Nový název:', file.name);
+            if (next && next !== file.name && !fs.exists('/desktop/' + next)) {
+              fs.move(path, '/desktop/' + next);
+              if (isWp) wallpaperPath.value = '/desktop/' + next;
+            }
+          } },
+        { label: 'Delete',         onSelect: () => {
+            if (isWp) clearWallpaper();
+            fs.delete(path);
+            fileIconPos.delete(file.name);
+          }, danger: true, hotkey: 'D' },
+      ],
+      onClose: () => { activeMenu.value = null; },
+    });
+  }
+
+  function menuForWidget(w, x, y) {
+    return createContextMenu({
+      x, y,
+      items: [
+        { label: 'Remove widget',  onSelect: () => removeWidget(w.id), danger: true, hotkey: 'D' },
+        { type: 'separator' },
+        ...Object.keys(WIDGETS).map(type => ({
+          label: 'Add ' + WIDGETS[type].label,
+          onSelect: () => addWidget(type, { x: w.x + 2, y: w.y + 2 }),
+        })),
+      ],
+      onClose: () => { activeMenu.value = null; },
+    });
+  }
+
+  function menuForDesktop(x, y) {
+    return createContextMenu({
+      x, y,
+      items: [
+        { label: 'New widget',
+          items: Object.keys(WIDGETS).map(type => ({
+            label: WIDGETS[type].label,
+            onSelect: () => addWidget(type, { x, y }),
+          })),
+        },
+        { label: 'New paint',      onSelect: () => openOrFocus('paint'), hotkey: 'P' },
+        { label: 'New file',       onSelect: () => {
+            fs.mkdir('/desktop');
+            const name = window.prompt('Název souboru (na /desktop/):', 'untitled.txt');
+            if (!name) return;
+            const path = '/desktop/' + name.replace(/^\/+/, '');
+            if (!fs.exists(path)) fs.write(path, '');
+          }, hotkey: 'F' },
+        { label: 'New folder',     onSelect: () => {
+            const name = window.prompt('Název složky (absolutní cesta):', '/desktop/new-folder');
+            if (!name) return;
+            fs.mkdir(name);
+          } },
+        { label: 'Open Finder',    onSelect: () => openOrFocus('finder') },
+        { type: 'separator' },
+        { label: 'Background',
+          items: Object.keys(PATTERNS).map(p => ({
+            label: p,
+            onSelect: () => { backgroundKind.value = p; bumpSave(); },
+          })),
+        },
+        { label: 'Theme',
+          items: Object.keys(engine.themes).map(name => ({
+            label: name,
+            onSelect: () => { engine.theme.value = engine.themes[name]; },
+          })),
+        },
+        ...(wallpaperPath.peek() ? [
+          { type: 'separator' },
+          { label: 'Remove wallpaper', onSelect: clearWallpaper, hotkey: 'W' },
+        ] : []),
+      ],
+      onClose: () => { activeMenu.value = null; },
+    });
+  }
+
+  // Decide which menu to show for a right-click / longpress at (x, y).
+  function openContextMenuAt(x, y) {
+    // priority: widget close × → file icon → app icon → widget → desktop
+    const file = fileIconHitTest(x, y);
+    if (file) { activeMenu.value = menuForFile(file, x, y); return; }
+    const app = iconHitTest(x, y);
+    if (app)  { activeMenu.value = menuForApp(app, x, y); return; }
+    const w = widgetHitTest(x, y);
+    if (w && !pointInAnyWindow(x, y)) { activeMenu.value = menuForWidget(w, x, y); return; }
+    if (!pointInAnyWindow(x, y)) {
+      activeMenu.value = menuForDesktop(x, y);
+    }
+  }
+
+  engine.onContextMenu((e) => { openContextMenuAt(e.x, e.y); });
+
+  // ── File drop: drag a file from OS onto the desktop or window ───
+  engine.onFileDrop(async (e) => {
+    fs.mkdir('/desktop');
+    for (const f of e.files) {
+      const name = f.name.replace(/[^\w.\- ]+/g, '_');
+      const path = '/desktop/' + name;
+      const isText = /^text\//.test(f.type) ||
+        /\.(txt|md|json|html|css|js|svg|acii)$/i.test(name);
+      try {
+        if (isText) fs.write(path, await f.asText());
+        else fs.write(path, await f.asArrayBuffer());
+      } catch (err) {
+        console.error('drop save failed', err);
+      }
+    }
+  });
+
+  function clampPos(x, y, w, h) {
+    const cols = engine.cols.peek();
+    const rows = engine.rows.peek();
+    const tbY = taskbarY();
+    const maxY = tbY >= 0 && taskbarPos.peek() === 'bottom' ? tbY - 1 : rows - 1;
+    return {
+      x: Math.max(0, Math.min(cols - w, x)),
+      y: Math.max(0, Math.min(maxY - h + 1, y)),
+    };
+  }
+
+  engine.onMouse((e) => {
+    // ── Active context menu intercepts mouse events ────────────
+    const am = activeMenu.peek();
+    if (am) {
+      // Outside-click closes (left + right). Inside-click is forwarded.
+      if (e.type === 'mousedown' || e.type === 'click') {
+        const b = am.bounds;
+        const inside = b && e.x >= b.x && e.x < b.x + b.w && e.y >= b.y && e.y < b.y + b.h;
+        if (!inside) {
+          activeMenu.value = null;
+          // Allow the click to fall through to whatever's underneath
+        } else {
+          try { am.onMouse?.(e); } catch {}
+          return;
+        }
+      } else if (e.type === 'mousemove') {
+        try { am.onMouse?.(e); } catch {}
+        return;
+      }
+    }
+
+    // ── Drag in progress: track move/up first ─────────────────
+    if (deskDrag) {
+      if (e.type === 'mousemove') {
+        const nx = deskDrag.baseX + (e.x - deskDrag.ox);
+        const ny = deskDrag.baseY + (e.y - deskDrag.oy);
+        if (deskDrag.kind === 'icon') {
+          const { x, y } = clampPos(nx, ny, ICON_W, ICON_H);
+          iconPositions.set(deskDrag.target, { x, y });
+          if (nx !== deskDrag.baseX || ny !== deskDrag.baseY) deskDrag.moved = true;
+        } else if (deskDrag.kind === 'file') {
+          const { x, y } = clampPos(nx, ny, ICON_W, ICON_H);
+          fileIconPos.set(deskDrag.target, { x, y });
+          if (nx !== deskDrag.baseX || ny !== deskDrag.baseY) deskDrag.moved = true;
+        } else if (deskDrag.kind === 'widget') {
+          const w = widgets.peek().find(x => x.id === deskDrag.target);
+          if (w) {
+            const c = clampPos(nx, ny, w.w, w.h);
+            // Re-emit signal so reactive consumers update
+            widgets.value = widgets.peek().map(x => x.id === w.id ? { ...x, x: c.x, y: c.y } : x);
+            if (nx !== deskDrag.baseX || ny !== deskDrag.baseY) deskDrag.moved = true;
+          }
+        }
+        return;
+      }
+      if (e.type === 'mouseup') {
+        if (deskDrag.moved) bumpSave();
+        deskDrag = null;
+        return;
+      }
+    }
+
+    if (e.type === 'dblclick') {
+      const file = fileIconHitTest(e.x, e.y);
+      if (file) { openFile('/desktop/' + file.name); return; }
+      const app = iconHitTest(e.x, e.y);
+      if (app) { openOrFocus(app.id); return; }
+    }
+
+    if (e.type === 'mousedown' && e.button === 0) {
+      const hit = taskbarHitTest(e.x, e.y);
+      if (hit?.kind === 'chip') { hit.win.focus(); return; }
+      // Start desktop drag only if NOT inside a window (WM handles its own drag)
+      if (!pointInAnyWindow(e.x, e.y)) {
+        // Close × on a widget — check before drag so user can hit it cleanly.
+        const closing = widgetCloseHit(e.x, e.y);
+        if (closing) { removeWidget(closing.id); return; }
+
+        const widget = widgetHitTest(e.x, e.y);
+        if (widget) {
+          widgets.value = [...widgets.peek().filter(x => x.id !== widget.id), widget];
+          deskDrag = { kind: 'widget', target: widget.id, ox: e.x, oy: e.y, baseX: widget.x, baseY: widget.y, moved: false };
+          return;
+        }
+        const file = fileIconHitTest(e.x, e.y);
+        if (file) {
+          const pos = fileIcon(file.name);
+          deskDrag = { kind: 'file', target: file.name, ox: e.x, oy: e.y, baseX: pos.x, baseY: pos.y, moved: false };
+          return;
+        }
+        const app = iconHitTest(e.x, e.y);
+        if (app) {
+          const pos = iconPos(app.id);
+          deskDrag = { kind: 'icon', target: app.id, ox: e.x, oy: e.y, baseX: pos.x, baseY: pos.y, moved: false };
+          return;
+        }
+      }
+    }
+
+    // Forward to focused app if click is inside its content area
+    const f = wm.focused.peek();
+    if (!f) return;
+    const wx = f.x.peek(), wy = f.y.peek(), ww = f.w.peek(), wh = f.h.peek();
+    const bx = wx + 1, by = wy + 1, bw = ww - 2, bh = wh - 2;
+    if (e.x < bx || e.y < by || e.x >= bx + bw || e.y >= by + bh) return;
+    const rec = running.get(f.id);
+    if (rec?.instance?.onMouse) {
+      try { rec.instance.onMouse({ ...e, x: e.x - bx, y: e.y - by }); } catch {}
+    }
+  });
+
+  engine.onTouch((e) => {
+    // Active menu — outside tap closes, inside-tap forwarded.
+    const am = activeMenu.peek();
+    if (am) {
+      if (e.type === 'tap') {
+        const b = am.bounds;
+        const inside = b && e.x >= b.x && e.x < b.x + b.w && e.y >= b.y && e.y < b.y + b.h;
+        if (!inside) { activeMenu.value = null; return; }
+        try { am.onMouse?.({ type: 'click', x: e.x, y: e.y, button: 0 }); } catch {}
+        return;
+      }
+    }
+    // Tap on widget close × removes it (touch shortcut).
+    if (e.type === 'tap' && !pointInAnyWindow(e.x, e.y)) {
+      const closing = widgetCloseHit(e.x, e.y);
+      if (closing) { removeWidget(closing.id); return; }
+    }
+    // Long-press → context menu (matches mobile OS convention).
+    // Touch-drag for moving icons: just touch+move directly (without longpress).
+    if (e.type === 'longpress' && !pointInAnyWindow(e.x, e.y)) {
+      openContextMenuAt(e.x, e.y);
+      return;
+    }
+    if (e.type === 'move' && deskDrag) {
+      const nx = deskDrag.baseX + (e.x - deskDrag.ox);
+      const ny = deskDrag.baseY + (e.y - deskDrag.oy);
+      if (deskDrag.kind === 'icon') {
+        const { x, y } = clampPos(nx, ny, ICON_W, ICON_H);
+        iconPositions.set(deskDrag.target, { x, y });
+      } else if (deskDrag.kind === 'widget') {
+        const w = widgets.peek().find(x => x.id === deskDrag.target);
+        if (w) {
+          const c = clampPos(nx, ny, w.w, w.h);
+          widgets.value = widgets.peek().map(x => x.id === w.id ? { ...x, x: c.x, y: c.y } : x);
+        }
+      }
+      deskDrag.moved = true;
+      return;
+    }
+    if ((e.type === 'end' || e.type === 'swipe') && deskDrag) {
+      if (deskDrag.moved) bumpSave();
+      deskDrag = null;
+      return;
+    }
+
+    if (e.type === 'doubletap') {
+      const app = iconHitTest(e.x, e.y);
+      if (app) { openOrFocus(app.id); return; }
+    }
+    if (e.type === 'tap') {
+      const hit = taskbarHitTest(e.x, e.y);
+      if (hit?.kind === 'chip') { hit.win.focus(); return; }
+    }
+    const f = wm.focused.peek();
+    if (!f) return;
+    const wx = f.x.peek(), wy = f.y.peek(), ww = f.w.peek(), wh = f.h.peek();
+    const bx = wx + 1, by = wy + 1, bw = ww - 2, bh = wh - 2;
+    if (e.x < bx || e.y < by || e.x >= bx + bw || e.y >= by + bh) return;
+    const rec = running.get(f.id);
+    if (rec?.instance?.onTouch) {
+      try { rec.instance.onTouch({ ...e, x: e.x - bx, y: e.y - by }); } catch {}
+    }
+  });
+
+  // Match a letter shortcut robustly across layouts. On macOS, Option+W
+  // produces e.key='∑' (or other symbols in Czech layout), but e.code is
+  // always 'KeyW' for the physical W key. Same for Ctrl+T etc.
+  const keyIs = (e, letter) => {
+    const code = `Key${letter.toUpperCase()}`;
+    return e.code === code || (e.key || '').toLowerCase() === letter.toLowerCase();
+  };
+
+  engine.onKey((e) => {
+    if (e.type !== 'down') return;
+
+    // Active menu eats keys first.
+    const am = activeMenu.peek();
+    if (am) {
+      if (e.key === 'Escape') { activeMenu.value = null; return; }
+      try { am.onKey?.(e); } catch {}
+      return;
+    }
+
+    if (e.key === 'Escape') {
+      const f = wm.focused.peek();
+      if (f && f.maximized.peek()) {
+        f.toggleMaximize();
+        return;
+      }
+      // Fall through to app handlers so Notes/Terminal/etc. can use Esc.
+    }
+
+    // Close focused window: Ctrl+W (Linux/Win) or Cmd+W (Mac).
+    if ((e.ctrl || e.meta) && keyIs(e, 'w') && !e.alt) {
+      e.raw?.preventDefault?.();
+      const f = wm.focused.peek();
+      if (f) f.close();
+      return;
+    }
+
+    // Cycle theme: Ctrl/Cmd+T
+    if ((e.ctrl || e.meta) && keyIs(e, 't') && !e.alt) {
+      e.raw?.preventDefault?.();
+      cycleTheme(); return;
+    }
+    // Cycle background pattern: Ctrl/Cmd+B
+    if ((e.ctrl || e.meta) && keyIs(e, 'b') && !e.alt) {
+      e.raw?.preventDefault?.();
+      const keys = Object.keys(PATTERNS);
+      const idx = keys.indexOf(backgroundKind.peek());
+      backgroundKind.value = keys[(idx + 1) % keys.length];
+      bumpSave();
+      return;
+    }
+    // Alt+W cycles spawn widget type: clock → stats → note
+    if (e.alt && keyIs(e, 'w')) {
+      const types = Object.keys(WIDGETS);
+      const existing = widgets.peek();
+      const lastType = existing[existing.length - 1]?.type;
+      const next = lastType ? types[(types.indexOf(lastType) + 1) % types.length] : types[0];
+      // Stagger so they don't stack on the same cell
+      const baseX = engine.cols.peek() - WIDGETS[next].defaultSize.w - 2;
+      const baseY = 2 + (existing.length % 6) * 2;
+      addWidget(next, { x: baseX, y: baseY });
+      return;
+    }
+    // Alt+X removes topmost widget
+    if (e.alt && keyIs(e, 'x')) {
+      const list = widgets.peek();
+      if (list.length) removeWidget(list[list.length - 1].id);
+      return;
+    }
+    // Alt+H toggle taskbar position
+    if (e.alt && keyIs(e, 'h')) {
+      const order = ['bottom', 'top', 'hidden'];
+      const i = order.indexOf(taskbarPos.peek());
+      taskbarPos.value = order[(i + 1) % order.length];
+      bumpSave();
+      return;
+    }
+    const f = wm.focused.peek();
+
+    // App launch by number key (1..9) — ONLY when no window is focused, so
+    // focused apps (Paint brushes, GameMaker, etc.) can use number keys.
+    // Cmd/Ctrl+number always launches, even with a focused window.
+    if (/^[1-9]$/.test(e.key) && !e.alt && ((e.ctrl || e.meta) || !f)) {
+      const idx = parseInt(e.key, 10) - 1;
+      const app = apps[idx];
+      if (app) {
+        e.raw?.preventDefault?.();
+        const existing = [...running.values()].find(r => r.spec.id === app.id);
+        if (existing) existing.win.focus();
+        else openApp(app.id);
+        return;
+      }
+    }
+
+    // Forward to focused app
+    if (!f) return;
+    const rec = running.get(f.id);
+    if (rec?.instance?.onKey) {
+      try { rec.instance.onKey(e); } catch {}
+    }
+  });
+
+  function cycleTheme() {
+    const keys = Object.keys(engine.themes);
+    const cur = engine.theme.peek().name;
+    const i = keys.indexOf(cur);
+    engine.theme.value = engine.themes[keys[(i + 1) % keys.length]];
+  }
+
+  // ── Restore previous session ────────────────────────────────────
+  if (saved?.windows?.length) {
+    // Defer to next tick so engine is fully ready
+    setTimeout(() => {
+      for (const w of saved.windows) openApp(w.appId, w);
+    }, 0);
+  }
+
+  // ── Per-frame render ────────────────────────────────────────────
+  function render() {
+    engine.clear();
+    renderBackground();
+    renderWidgets();        // pinned widgets — under icons/windows
+    renderIcons();
+    renderFileIcons();      // /desktop/* files
+    renderHint();           // BEFORE wm so windows occlude it
+    wm.render();
+    renderTaskbar();
+    renderActiveMenu();     // context menu always on top
+  }
+
+  function renderActiveMenu() {
+    const m = activeMenu.peek();
+    if (!m) return;
+    try { m.render(engine); } catch { activeMenu.value = null; }
+  }
+
+  // Subscribe to FS changes so wallpaper / icons stay in sync.
+  effect(() => { fs.changes.value; });
+  fs.subscribe('/desktop', () => { /* react via signal */ });
+
+  // First-boot defaults: spawn a clock widget if user has nothing saved.
+  if (!saved?.widgets?.length) {
+    setTimeout(() => {
+      const cols = engine.cols.peek();
+      addWidget('clock', { x: Math.max(2, cols - 14), y: 2 });
+    }, 0);
+  }
+
+  return {
+    wm, fs,
+    render,
+    openApp, closeApp, openFile,
+    cycleTheme,
+    addWidget, removeWidget, widgets,
+    setWallpaper, clearWallpaper, wallpaperPath,
+    activeMenu,
+    taskbarPos, backgroundKind,
+    running,
+  };
+}
