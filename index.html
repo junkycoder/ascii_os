@@ -26,6 +26,16 @@
       env(safe-area-inset-bottom)
       env(safe-area-inset-left);
   }
+  /* Native iOS only (class set by src/mobile.js). With the status bar HIDDEN,
+     iOS reports a smaller safe-area-inset-top, so the grid would slide under
+     the Dynamic Island / notch. Reserve a minimum top inset so the top row
+     (hint banner, window title bars) clears the island — as if the status bar
+     were still there, just without the clock. Desktop stays untouched (no
+     class → plain env() above, which is 0). */
+  html.cap-native #app {
+    padding-top: max(env(safe-area-inset-top), 48px);
+    padding-bottom: max(env(safe-area-inset-bottom), 8px);
+  }
 
   .acii-root {
     background: var(--acii-bg, #000);
