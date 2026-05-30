@@ -1,6 +1,8 @@
 // notes.js — multi-line text editor with localStorage persistence.
 // Mounted by the WM. Coords passed to render(ctx) are LOCAL to window content.
 import { signal, effect } from '../signals.js';
+import { createVim } from '../vim.js';
+import { createUser } from '../user.js';
 
 const STORAGE_KEY = 'acii.notes';
 const SAVE_DEBOUNCE_MS = 500;
@@ -28,6 +30,39 @@ export function createApp(initialCtx, win) {
   let col = 0;      // caret col (char index inside line)
   let scrollY = 0;  // first visible row in viewport (vertical scroll)
 
+  // Optional vim editing (opt-in via the shared user pref; F9 toggles it).
+  const user = globalThis.__aciiUser ||= createUser();
+  let vim = null;
+  const vimEnabled = () => { try { return !!user.get('vimEnabled'); } catch { return false; } };
+  function ensureVim() {
+    const want = vimEnabled();
+    if (want && !vim) {
+      vim = createVim(lines.join('\n'));
+      vim.onCommand = (cmd) => {
+        if (cmd === 'w' || cmd === 'wq' || cmd === 'x') { syncFromVim(); commitSave(); }
+        if (cmd === 'q' || cmd === 'wq' || cmd === 'q!' || cmd === 'x') { try { win && win.close && win.close(); } catch {} }
+        if (vim.clearPendingCommand) vim.clearPendingCommand();
+      };
+    } else if (!want && vim) {
+      syncFromVim();
+      vim = null;
+    }
+  }
+  function syncFromVim() {
+    if (!vim) return;
+    lines = vim.getText().split('\n');
+    if (lines.length === 0) lines = [''];
+    row = Math.min(vim.cursor.y, lines.length - 1);
+    col = vim.cursor.x;
+  }
+  function toggleVim() {
+    const next = !vimEnabled();
+    if (!next) syncFromVim();
+    user.set('vimEnabled', next);
+    ensureVim();
+    if (vim) { vim.setText(lines.join('\n')); vim.cursor.y = Math.min(row, lines.length - 1); vim.cursor.x = col; }
+  }
+
   // Save bookkeeping
   let saveTimer = null;
   let lastSavedAt = 0;
@@ -53,6 +88,7 @@ export function createApp(initialCtx, win) {
     lines = DEFAULT_CONTENT.split('\n');
   }
   if (lines.length === 0) lines = [''];
+  ensureVim(); // honor a previously-set vim preference
 
   // ── Save (debounced) ─────────────────────────────────────────────────
   function scheduleSave() {
@@ -147,7 +183,15 @@ export function createApp(initialCtx, win) {
       const H = ctx.height;
       if (W <= 0 || H <= 0) return;
 
-      ensureCaretVisible(ctx);
+      // Buffer source of truth: vim engine when active, else our own lines.
+      const buf = vim ? vim.lines : lines;
+      const curRow = vim ? vim.cursor.y : row;
+      const curCol = vim ? vim.cursor.x : col;
+      // Keep vertical scroll following the active cursor.
+      const _vh = viewportHeight(ctx);
+      if (curRow < scrollY) scrollY = curRow;
+      else if (curRow >= scrollY + _vh) scrollY = curRow - _vh + 1;
+      if (scrollY < 0) scrollY = 0;
 
       // Clear our window area to theme bg.
       ctx.rect(0, 0, W, H, { ch: ' ', bg: C.bg, fg: C.fg });
@@ -158,8 +202,8 @@ export function createApp(initialCtx, win) {
       // Draw visible lines.
       for (let i = 0; i < vh; i++) {
         const lineIdx = scrollY + i;
-        if (lineIdx >= lines.length) break;
-        const line = lines[lineIdx];
+        if (lineIdx >= buf.length) break;
+        const line = buf[lineIdx];
         let visible = line;
         let truncated = false;
         if (line.length > maxLineWidth) {
@@ -176,21 +220,19 @@ export function createApp(initialCtx, win) {
 
       // Caret: only paint if focused, and only if within viewport.
       const focused = win && win.focused ? win.focused.value : true;
-      const caretY = row - scrollY;
+      const caretY = curRow - scrollY;
+      const vimNormal = vim && vim.mode !== 'insert';
       if (focused && caretY >= 0 && caretY < vh) {
-        // If caret is past the truncation point, clamp it to the last visible col
-        // so the user can still see something — they'll need to scroll horizontally
-        // in a future revision, but for now we just pin to the edge.
-        const caretX = Math.min(col, maxLineWidth - 1, W - 1);
+        const caretX = Math.min(curCol, maxLineWidth - 1, W - 1);
         if (caretX >= 0) {
-          // Char under caret (if any) — used for inverse block style.
-          const lineAtCaret = lines[row] || '';
-          const underCh = lineAtCaret[col] || ' ';
-          if (blinkOn) {
-            // Inverse block: bg=accent, fg=bg.
+          const lineAtCaret = buf[curRow] || '';
+          const underCh = lineAtCaret[curCol] || ' ';
+          if (vimNormal) {
+            // Solid block caret in vim normal/visual mode.
+            ctx.put(caretX, caretY, underCh, { fg: C.bg, bg: C.fg });
+          } else if (blinkOn) {
             ctx.put(caretX, caretY, underCh, { fg: C.bg, bg: C.accent });
           } else {
-            // Off-phase: just show the underlying char.
             ctx.put(caretX, caretY, underCh, { fg: C.fg, bg: C.bg });
           }
         }
@@ -199,11 +241,19 @@ export function createApp(initialCtx, win) {
       // Status bar (bottom row).
       const statusY = H - 1;
       ctx.rect(0, statusY, W, 1, { ch: ' ', bg: C.bg, fg: C.fgDim });
-      const lineNum = row + 1;
-      const colNum = col + 1;
-      const words = wordCount();
-      const left = `L${lineNum}:C${colNum}  Words: ${words}`;
-      ctx.text(0, statusY, left.slice(0, W), { fg: C.fgDim, bg: C.bg });
+      const lineNum = curRow + 1;
+      const colNum = curCol + 1;
+      let n = 0; for (const ln of buf) { const m = ln.match(/\S+/g); if (m) n += m.length; }
+      const vimStatus = vim ? ((vim.status && vim.status()) || '-- NORMAL --') : '';
+      const left = vim
+        ? `${vimStatus}  L${lineNum}:C${colNum}`
+        : `L${lineNum}:C${colNum}  Words: ${n}  ·  F9 vim`;
+      ctx.text(0, statusY, left.slice(0, W), { fg: vim ? C.accent : C.fgDim, bg: C.bg });
+
+      // Live vim command line (e.g. ":w") shown to the right of position.
+      if (vim && vim.cmdline) {
+        ctx.text(Math.min(left.length + 2, W - vim.cmdline.length - 1), statusY, vim.cmdline, { fg: C.warning, bg: C.bg });
+      }
 
       const flashing = savedFlash.value;
       const saveLabel = flashing ? 'Saved' : (saveTimer ? '...' : 'Saved');
@@ -217,6 +267,18 @@ export function createApp(initialCtx, win) {
     onKey(e) {
       if (e.type !== 'down') return;
       const k = e.key;
+
+      // Toggle vim editing (opt-in). Mirrors Findman's F9.
+      if (k === 'F9') { toggleVim(); return; }
+
+      // When vim is active, route everything through the engine.
+      if (vim) {
+        const before = vim.getText();
+        vim.feed(e);
+        if (vim.getText() !== before) { syncFromVim(); scheduleSave(); }
+        else { syncFromVim(); } // keep row/col in sync for status even on pure motion
+        return;
+      }
 
       // Movement
       if (k === 'ArrowLeft') {
@@ -270,32 +332,27 @@ export function createApp(initialCtx, win) {
       // Map click to caret position. e.x / e.y are LOCAL to window.
       const vh = viewportHeight(initialCtx);
       if (e.y < 0 || e.y >= vh) return;
-      const targetRow = scrollY + e.y;
-      if (targetRow >= lines.length) {
-        row = lines.length - 1;
-        col = lines[row].length;
-        return;
-      }
-      row = targetRow;
-      col = Math.min(Math.max(0, e.x), lines[row].length);
+      const buf = vim ? vim.lines : lines;
+      let r = scrollY + e.y;
+      if (r >= buf.length) r = buf.length - 1;
+      const c = Math.min(Math.max(0, e.x), buf[r].length);
+      if (vim) { vim.cursor.y = r; vim.cursor.x = c; } else { row = r; col = c; }
     },
 
     onTouch(e) {
       if (e.type !== 'tap') return;
       const vh = viewportHeight(initialCtx);
       if (e.y < 0 || e.y >= vh) return;
-      const targetRow = scrollY + e.y;
-      if (targetRow >= lines.length) {
-        row = lines.length - 1;
-        col = lines[row].length;
-        return;
-      }
-      row = targetRow;
-      col = Math.min(Math.max(0, e.x), lines[row].length);
+      const buf = vim ? vim.lines : lines;
+      let r = scrollY + e.y;
+      if (r >= buf.length) r = buf.length - 1;
+      const c = Math.min(Math.max(0, e.x), buf[r].length);
+      if (vim) { vim.cursor.y = r; vim.cursor.x = c; } else { row = r; col = c; }
     },
 
     destroy() {
       // Flush any pending save synchronously so we don't lose recent edits.
+      syncFromVim();
       if (saveTimer) {
         clearTimeout(saveTimer);
         saveTimer = null;
