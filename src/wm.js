@@ -215,7 +215,7 @@ export function createWindowManager(engine, opts = {}) {
   // ── Hit testing ──────────────────────────────────────────────────
   // Each region a click can land in.
   // Returns { win, zone, btn? } or null. zone: 'title'|'body'|'border'|'resize'|'btn'
-  function hitTest(px, py) {
+  function hitTest(px, py, touch = false) {
     const list = windows.peek();
     // Iterate top-down so the visually-on-top window wins.
     for (let i = list.length - 1; i >= 0; i--) {
@@ -229,6 +229,14 @@ export function createWindowManager(engine, opts = {}) {
       // Inside this window.
       const localX = px - wx;
       const localY = py - wy;
+
+      // Touch fingers are far bigger than one cell. Give title buttons a
+      // 2-row-tall target (title row + the row directly below it) so close /
+      // minimize / maximize are comfortably tappable. Mouse stays pixel-exact.
+      if (touch && (localY === 0 || localY === 1) && wh >= 2) {
+        const btn = hitTitleButton(win, localX, ww, true);
+        if (btn) return { win, zone: 'btn', btn };
+      }
 
       // Title row is y=0. Body is y=1 .. h-2. Last row is bottom border.
       // Resize handle is the bottom-right cell.
@@ -258,7 +266,7 @@ export function createWindowManager(engine, opts = {}) {
   // We render up to three buttons: [_] [□] [×], each occupies one cell with a
   // single-cell gap between them, anchored to ww-2 (last cell is right border).
   // Returns the button id or null.
-  function hitTitleButton(win, localX, ww) {
+  function hitTitleButton(win, localX, ww, touch = false) {
     const buttons = visibleButtons(win);
     if (!buttons.length) return null;
     // Special-case the right corner glyph (ww-1) — clicks there commonly
@@ -266,13 +274,14 @@ export function createWindowManager(engine, opts = {}) {
     // where cell rounding at the viewport edge can miss by one.
     if (localX === ww - 1) return buttons[buttons.length - 1];
 
-    // Each button covers 2 cells: the glyph + the cell immediately to its left
-    // (the separator). This widens the click target without overlapping with
-    // the title text region.
+    // Each button covers a slice of cells: the glyph + cells to its left.
+    // Mouse uses a 2-cell slice (glyph + separator). Touch widens to 3 cells
+    // per button so fingers can land reliably.
+    const slice = touch ? 3 : 2;
     let cursor = ww - 2;
     for (let i = buttons.length - 1; i >= 0; i--) {
-      if (localX === cursor || localX === cursor - 1) return buttons[i];
-      cursor -= 2;
+      if (localX <= cursor && localX > cursor - slice) return buttons[i];
+      cursor -= slice;
       if (cursor < 1) break;
     }
     return null;
@@ -396,7 +405,7 @@ export function createWindowManager(engine, opts = {}) {
       return;
     }
     if (e.type === 'tap') {
-      const hit = hitTest(e.x, e.y);
+      const hit = hitTest(e.x, e.y, true);
       if (!hit) return;
       bringToFront(hit.win);
       if (hit.zone === 'btn') {
@@ -407,12 +416,12 @@ export function createWindowManager(engine, opts = {}) {
       return;
     }
     if (e.type === 'doubletap') {
-      const hit = hitTest(e.x, e.y);
+      const hit = hitTest(e.x, e.y, true);
       if (hit && hit.zone === 'title') toggleMaximize(hit.win);
       return;
     }
     if (e.type === 'longpress') {
-      const hit = hitTest(e.x, e.y);
+      const hit = hitTest(e.x, e.y, true);
       if (!hit) return;
       bringToFront(hit.win);
       if (hit.zone === 'title' && !hit.win.maximized.peek()) {

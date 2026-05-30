@@ -84,8 +84,21 @@ export function createApp(initialCtx, win) {
 
   // ── Tree state ─────────────────────────────────────────────────────
   const expanded = new Set(['/']);
-  let selectedPath = '/docs/README.md';
+  let selectedPath = '/docs/README.md';     // the cursor / lead row
   let treeScroll = 0;
+
+  // ── Multi-selection (for bulk actions) ─────────────────────────────
+  // `selected` holds the EXTRA marked paths beyond the single cursor; it is
+  // empty during ordinary single-row navigation and only fills up via
+  // Shift/Cmd+click, Shift+arrows, Cmd+A, spacebar, or a marquee drag.
+  const selected = new Set();
+  let selAnchorIdx = -1;                     // anchor for Shift-range extends
+
+  // Marquee (rubber-band) drag-select. Coords are LOCAL to the window content
+  // (same space as render), so the box can be drawn directly. `base` is the
+  // selection snapshot at drag start (for additive Cmd-drag).
+  let drag = null;
+  let suppressClick = false;                 // eat the click that trails a drag
 
   // ── Editor state ───────────────────────────────────────────────────
   let editorPath = null;
@@ -437,6 +450,80 @@ export function createApp(initialCtx, win) {
     if (next >= visibleRows.length) next = visibleRows.length - 1;
     selectByIndex(next);
   }
+
+  // ── Multi-selection helpers ────────────────────────────────────────
+  function clearMulti() { selected.clear(); selAnchorIdx = -1; }
+  function selectableAt(i) {
+    const r = visibleRows[i];
+    return r && !r.isMountAction ? r : null;
+  }
+  // Move the cursor; plain navigation drops any multi-selection, Shift extends.
+  function moveCursor(delta, extend) {
+    if (extend) { extendSelection(delta); return; }
+    clearMulti();
+    moveSelection(delta);
+  }
+  function toggleAt(i) {
+    const r = selectableAt(i);
+    if (!r) return;
+    if (selected.has(r.path)) selected.delete(r.path);
+    else selected.add(r.path);
+    selectedPath = r.path;
+    selAnchorIdx = i;
+  }
+  // Replace (or, if additive, augment) the selection with the anchor..to band.
+  function rangeSelect(fromIdx, toIdx, additive) {
+    if (!additive) selected.clear();
+    const a = Math.min(fromIdx, toIdx), b = Math.max(fromIdx, toIdx);
+    for (let i = a; i <= b; i++) {
+      const r = selectableAt(i);
+      if (r) selected.add(r.path);
+    }
+    const lead = selectableAt(toIdx);
+    if (lead) selectedPath = lead.path;
+  }
+  function extendSelection(delta) {
+    const cur = indexOfSelected();
+    let anchor = selAnchorIdx;
+    if (anchor < 0) { anchor = cur < 0 ? 0 : cur; }
+    let next = (cur < 0 ? 0 : cur) + delta;
+    if (next < 0) next = 0;
+    if (next >= visibleRows.length) next = visibleRows.length - 1;
+    rangeSelect(anchor, next, false);
+    selAnchorIdx = anchor;
+  }
+  function selectAllFiles() {
+    selected.clear();
+    for (let i = 0; i < visibleRows.length; i++) {
+      const r = selectableAt(i);
+      if (r) selected.add(r.path);
+    }
+    selAnchorIdx = 0;
+  }
+
+  // Translate the current marquee rectangle into a live selection: every
+  // visible tree row whose screen line falls inside the band is marked.
+  function updateMarqueeSelection() {
+    if (!drag) return;
+    const paneH = (initialCtx.height ?? 24) - 1;
+    const lo = Math.min(drag.startY, drag.curY);
+    const hi = Math.max(drag.startY, drag.curY);
+    const next = drag.additive ? new Set(drag.base) : new Set();
+    for (let i = 0; i < visibleRows.length; i++) {
+      const screenY = 1 + (i - treeScroll);          // row 0 → content line 1
+      if (screenY < 1 || screenY >= paneH - 1) continue;
+      if (screenY >= lo && screenY <= hi) {
+        const r = visibleRows[i];
+        if (r && !r.isMountAction) next.add(r.path);
+      }
+    }
+    selected.clear();
+    for (const p of next) selected.add(p);
+    // The cursor follows the row under the pointer's current Y.
+    const ci = treeScroll + (drag.curY - 1);
+    const lead = selectableAt(ci);
+    if (lead) selectedPath = lead.path;
+  }
   function selectedRow() {
     const i = indexOfSelected();
     return i < 0 ? null : visibleRows[i];
@@ -496,23 +583,40 @@ export function createApp(initialCtx, win) {
   }
 
   function deleteSelected() {
-    const r = selectedRow();
-    if (!r || r.isMountAction) return;
-    if (!window.confirm('Delete ' + r.path + ' ?')) return;
-    try {
-      fs.delete(r.path);
-      if (editorPath === r.path) {
-        editorPath = null;
-        editorLines = [''];
-        editorBinarySize = -1;
-        editorDirty = false;
-        drafts.clear(r.path);
-        teardownVim();
-      }
-      rebuildVisibleRows();
-    } catch (e) {
-      editorLoadError = String(e && e.message || e);
+    // Operate on the multi-selection when present, otherwise the cursor row.
+    let targets;
+    if (selected.size > 0) {
+      targets = [...selected];
+    } else {
+      const r = selectedRow();
+      if (!r || r.isMountAction) return;
+      targets = [r.path];
     }
+    targets = targets.filter(p => p && p !== '/' && fs.exists(p));
+    if (targets.length === 0) return;
+    const msg = targets.length === 1
+      ? 'Delete ' + targets[0] + ' ?'
+      : 'Delete ' + targets.length + ' items?';
+    if (!window.confirm(msg)) return;
+    // Deepest paths first so deleting a child never trips over a removed parent.
+    targets.sort((a, b) => b.length - a.length);
+    for (const p of targets) {
+      try {
+        fs.delete(p);
+        if (editorPath === p) {
+          editorPath = null;
+          editorLines = [''];
+          editorBinarySize = -1;
+          editorDirty = false;
+          teardownVim();
+        }
+        try { drafts.clear(p); } catch {}
+      } catch (e) {
+        editorLoadError = String(e && e.message || e);
+      }
+    }
+    clearMulti();
+    rebuildVisibleRows();
   }
 
   function parentDirOfSelection() {
@@ -606,7 +710,8 @@ export function createApp(initialCtx, win) {
       const ri = treeScroll + i;
       if (ri >= visibleRows.length) break;
       const row = visibleRows[ri];
-      const isSel = row.path === selectedPath;
+      const isCursor = row.path === selectedPath;
+      const isMulti = selected.has(row.path);
 
       let glyph;
       if (row.isMountAction) glyph = ' ';
@@ -615,18 +720,40 @@ export function createApp(initialCtx, win) {
 
       const indent = '  '.repeat(row.depth);
       const text = `${indent}${glyph} ${row.name}`;
-      const fg = isSel
-        ? (treeFocused ? C.bg : C.fg)
-        : (row.isMountAction ? C.accent : (row.type === 'dir' ? C.fg : C.fgDim));
-      const bg = isSel ? (treeFocused ? C.accent : C.border) : C.bg;
+      // Cursor wins the strongest paint; extra marquee/multi rows get a softer
+      // theme-tinted band so a whole selection reads at a glance.
+      let fg, bg;
+      if (isCursor && treeFocused) { bg = C.accent; fg = C.bg; }
+      else if (isCursor) { bg = C.border; fg = C.fg; }
+      else if (isMulti) { bg = C.border; fg = treeFocused ? C.accent : C.fg; }
+      else {
+        bg = C.bg;
+        fg = row.isMountAction ? C.accent : (row.type === 'dir' ? C.fg : C.fgDim);
+      }
+      const bold = (isCursor && treeFocused) || isMulti;
 
       ctx.rect(x0 + 1, y0 + 1 + i, innerW, 1, { ch: ' ', bg, fg });
       const visible = text.slice(0, innerW);
-      ctx.text(x0 + 1, y0 + 1 + i, visible, { fg, bg, bold: isSel && treeFocused });
+      ctx.text(x0 + 1, y0 + 1 + i, visible, { fg, bg, bold });
 
-      if (isSel && treeFocused) {
+      if (isCursor && treeFocused) {
         ctx.put(x0 + w - 2, y0 + 1 + i, '◄', { fg, bg });
+      } else if (isMulti) {
+        ctx.put(x0 + w - 2, y0 + 1 + i, '•', { fg: C.accent, bg });
       }
+    }
+
+    // Marquee outline drawn on top of the rows it spans (theme-accent box).
+    if (drag && drag.moved) {
+      const clampX = (v) => Math.max(x0 + 1, Math.min(v, x0 + w - 2));
+      const clampY = (v) => Math.max(y0 + 1, Math.min(v, y0 + h - 2));
+      const mx1 = clampX(Math.min(drag.startX, drag.curX));
+      const mx2 = clampX(Math.max(drag.startX, drag.curX));
+      const my1 = clampY(Math.min(drag.startY, drag.curY));
+      const my2 = clampY(Math.max(drag.startY, drag.curY));
+      ctx.box(mx1, my1, mx2 - mx1 + 1, my2 - my1 + 1, {
+        fg: C.borderFocus, glyphSet: 'borderRound',
+      });
     }
   }
 
@@ -784,6 +911,9 @@ export function createApp(initialCtx, win) {
     } else if (notice) {
       left = notice;
       leftFg = C.success;
+    } else if (focus === 'tree' && selected.size > 1) {
+      left = selected.size + ' selected · ⌫ delete · Esc clear';
+      leftFg = C.accent;
     } else if (editorPath) {
       const st = fs.exists(editorPath) ? fs.stat(editorPath) : null;
       const size = st && st.type === 'file' ? st.size : 0;
@@ -801,7 +931,7 @@ export function createApp(initialCtx, win) {
     if (flashing) {
       right = 'Saved';
     } else if (focus === 'tree') {
-      right = 'N new · ⇧N folder · R rename · ⌫ del · ↵ open · ⇥ editor · F1 about';
+      right = 'drag/⇧↑↓ select · ⌘A all · N new · R rename · ⌫ del · ↵ open · ⇥ editor';
     } else if (vim) {
       right = ':w save · :q close · F9 vim off';
     } else {
@@ -927,14 +1057,25 @@ export function createApp(initialCtx, win) {
       }
 
       if (focus === 'tree') {
-        if (k === 'ArrowUp') { moveSelection(-1); return; }
-        if (k === 'ArrowDown') { moveSelection(1); return; }
-        if (k === 'PageUp') { moveSelection(-8); return; }
-        if (k === 'PageDown') { moveSelection(8); return; }
-        if (k === 'Home') { selectByIndex(0); return; }
-        if (k === 'End') { selectByIndex(visibleRows.length - 1); return; }
-        if (k === 'ArrowRight') { expandOrFocusEditor(); return; }
-        if (k === 'ArrowLeft') { collapseOrParent(); return; }
+        // Select-all (Cmd/Ctrl+A) and clear (Esc) for the multi-selection.
+        if ((e.ctrl || e.meta) && (e.code === 'KeyA' || k === 'a' || k === 'A')) {
+          selectAllFiles(); return;
+        }
+        if (k === 'Escape' && selected.size > 0) { clearMulti(); return; }
+        // Spacebar toggles the cursor row's membership in the selection.
+        if (k === ' ' || e.code === 'Space') {
+          const i = indexOfSelected();
+          if (i >= 0) toggleAt(i);
+          return;
+        }
+        if (k === 'ArrowUp') { moveCursor(-1, e.shift); return; }
+        if (k === 'ArrowDown') { moveCursor(1, e.shift); return; }
+        if (k === 'PageUp') { moveCursor(-8, e.shift); return; }
+        if (k === 'PageDown') { moveCursor(8, e.shift); return; }
+        if (k === 'Home') { clearMulti(); selectByIndex(0); return; }
+        if (k === 'End') { clearMulti(); selectByIndex(visibleRows.length - 1); return; }
+        if (k === 'ArrowRight') { clearMulti(); expandOrFocusEditor(); return; }
+        if (k === 'ArrowLeft') { clearMulti(); collapseOrParent(); return; }
         if (k === 'Enter') { activateSelection(); return; }
         if (k === 'Delete' || k === 'Backspace') { deleteSelected(); return; }
         if (e.code === 'KeyN' || k === 'n' || k === 'N') {
@@ -1022,17 +1163,58 @@ export function createApp(initialCtx, win) {
         }
         return;
       }
-      if (e.type !== 'click' && e.type !== 'mousedown' && e.type !== 'dblclick') return;
       const W = initialCtx.width;
       const H = initialCtx.height;
       const lw = leftPaneWidth(W);
       const paneH = H - 1;
+      const inTree = (x, y) => x >= 0 && x < lw && y >= 1 && y < paneH - 1;
+      const mod = (ev) => !!(ev.raw && (ev.raw.metaKey || ev.raw.ctrlKey));
+      const shiftDown = (ev) => !!(ev.raw && ev.raw.shiftKey);
 
-      if (e.x >= 0 && e.x < lw && e.y >= 1 && e.y < paneH - 1) {
+      // ── Marquee / modifier selection in the tree pane ──────────────
+      if (e.type === 'mousedown' && (e.button === 0 || e.button == null) && inTree(e.x, e.y)) {
+        focus = 'tree';
+        const rowIdx = treeScroll + (e.y - 1);
+        if (shiftDown(e) && selAnchorIdx >= 0 && rowIdx < visibleRows.length) {
+          rangeSelect(selAnchorIdx, rowIdx, mod(e));
+          suppressClick = true;
+          return;
+        }
+        if (mod(e) && rowIdx < visibleRows.length) {
+          toggleAt(rowIdx);
+          suppressClick = true;
+          return;
+        }
+        // Otherwise begin a candidate drag; a real move turns it into a marquee,
+        // a release without movement falls through to the plain click below.
+        drag = { startX: e.x, startY: e.y, curX: e.x, curY: e.y, moved: false, additive: false, base: new Set(selected) };
+        return;
+      }
+      if (e.type === 'mousemove' && drag) {
+        drag.curX = e.x; drag.curY = e.y;
+        if (Math.abs(e.x - drag.startX) + Math.abs(e.y - drag.startY) >= 1) drag.moved = true;
+        if (drag.moved) updateMarqueeSelection();
+        return;
+      }
+      if (e.type === 'mouseup') {
+        if (drag) {
+          if (drag.moved) { updateMarqueeSelection(); suppressClick = true; selAnchorIdx = indexOfSelected(); }
+          drag = null;
+        }
+        return;
+      }
+
+      if (e.type !== 'click' && e.type !== 'dblclick') return;
+      // The click that trails a drag / modifier-select must not activate.
+      if (suppressClick) { suppressClick = false; return; }
+
+      if (inTree(e.x, e.y)) {
         focus = 'tree';
         const rowIdx = treeScroll + (e.y - 1);
         if (rowIdx >= 0 && rowIdx < visibleRows.length) {
+          clearMulti();
           selectByIndex(rowIdx);
+          selAnchorIdx = rowIdx;
           if (e.type === 'dblclick' || e.type === 'click') {
             activateSelection();
           }
@@ -1064,6 +1246,17 @@ export function createApp(initialCtx, win) {
     },
 
     onTouch(e) {
+      if (e.type === 'longpress') {
+        // Long-press a tree row to toggle it in the multi-selection.
+        const W = initialCtx.width, H = initialCtx.height;
+        const lw = leftPaneWidth(W), paneH = H - 1;
+        if (e.x >= 0 && e.x < lw && e.y >= 1 && e.y < paneH - 1) {
+          focus = 'tree';
+          const rowIdx = treeScroll + (e.y - 1);
+          if (rowIdx >= 0 && rowIdx < visibleRows.length) toggleAt(rowIdx);
+        }
+        return;
+      }
       if (e.type === 'tap') {
         this.onMouse({ type: 'click', x: e.x, y: e.y });
       } else if (e.type === 'doubletap') {

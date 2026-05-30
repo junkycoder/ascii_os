@@ -1,0 +1,37 @@
+# Files NOT served as static assets by the Cloudflare worker.
+# (Like .gitignore, but for `wrangler deploy` asset uploads.)
+
+# Toolchain & native wrapper — never part of the web build.
+node_modules
+ios
+tools
+www
+teat
+.claude
+.git
+
+# Worker source / wrangler internals are not public assets.
+worker
+.wrangler
+
+# Project meta / docs — keep them off the public origin.
+package.json
+package-lock.json
+capacitor.config.json
+wrangler.jsonc
+.assetsignore
+.gitignore
+CLAUDE.md
+HANDOFF.md
+CAPACITOR.md
+
+# Secrets — must never be served as a public asset.
+.env
+.env.*
+.dev.vars
+.dev.vars.*
+
+# OS / editor cruft
+.DS_Store
+*.log
+*.swp
