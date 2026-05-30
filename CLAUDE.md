@@ -1,17 +1,22 @@
 # CLAUDE.md — acii_os project guide
 
 ASCII-first UI framework + desktop shell for the browser. **Read `HANDOFF.md`
-for current state and the work backlog before starting.**
+for current state and the work backlog before starting.** This file and
+`AGENTS.md` carry the same guidance — keep them in sync if you edit one.
 
 ## Repo / git
 - **Default branch is `trunk`** (not `main`). Remote: `origin`
   (`git@github.com:junkycoder/ascii_os.git`). Base PRs / merges on `trunk`.
+- Pushes to `trunk` **auto-deploy to Cloudflare** (`.github/workflows/deploy.yml`).
+- `gh` is authenticated (keychain) — open PRs against `trunk` via a branch.
+- Manual deploy `npx wrangler deploy` needs **Wrangler 4.x** (CI pins `4.95.0`);
+  3.x can't read `wrangler.jsonc`.
 
 ## Non-negotiable constraints
 - **Zero dependencies. No build step. No TypeScript.** Vanilla ES modules only.
-  (The Capacitor iOS wrapper — `package.json`, `tools/build-www.mjs`, `www/` —
-  is a dev-time native shell only; it adds no runtime deps to `src/`. See
-  `CAPACITOR.md`.)
+  (The Capacitor iOS wrapper — `package.json`, `tools/build-www.mjs`, `www/`,
+  `worker/` — is a dev-time native/edge shell only; it adds no runtime deps to
+  `src/`. See `CAPACITOR.md`.)
 - Must run "anywhere the web runs" — desktop, mobile (touch), TV. Keep it text.
 - Everything renders into one DOM cell grid via the engine. No canvas, no SVG.
 - Text in the grid stays copyable / accessible.
@@ -20,25 +25,39 @@ for current state and the work backlog before starting.**
 ```
 src/signals.js   reactive core: signal / computed / effect / batch
 src/engine.js    cell buffer, DOM diff renderer, 30fps loop, kbd/mouse/touch,
-                 subContext (clipped local-coord drawing), onContextMenu, onFileDrop
+                 subContext (clipped local-coord drawing), onContextMenu,
+                 onFileDrop, responsive `mode` signal
 src/themes.js    4 themes; theme is a signal → instant re-paint
 src/ui.js        UI kit (Panel/Button/Input/TextArea/List/Menu/Tabs/…)
-src/wm.js        window manager (z-order, drag, resize, maximize, focus chain)
+src/wm.js        window manager (z-order, drag, resize, maximize, minimize, focus)
 src/markdown.js  markdown view with hidden markup
+src/syntax.js    pure source highlighter (js/json/css/html/py/sh/md) → role spans
+src/vim.js       reusable modal vim engine over a text buffer (pure logic, no DOM)
+src/drafts.js    draft / auto-backup store (last unsaved edit per path)
+src/user.js      system user + preferences (vimEnabled, quicklook, …)
+src/keymap.js    global leader-key scheme + Quick-Look routing (pure logic)
 src/fs.js        virtual FS (in-memory + localStorage + File System Access mounts)
 src/users.js     account store + session (localStorage); per-user storage keys
 src/login.js     ASCII login screen (createLogin) — runs before the shell boots
 src/ui-menu.js   context / dropdown menu (createContextMenu)
 src/media.js     imageToAscii, createVideoPlayer, createAudio
+src/music.js     createMusicPlayer (virtual-FS audio + open internet radio)
+src/mobile.js    Capacitor native integration, browser-safe (no-op in browser)
 src/shell.js     desktop shell — wires engine+wm+apps, icons, taskbar, widgets,
-                 wallpaper, context menus, file drop, input routing; user chip +
-                 logout menu (opts.user / opts.onLogout / opts.storageKey)
-src/apps/*.js    apps (terminal, snake, notes, paint, readme, finder, video, gamemaker)
+                 wallpaper, context menus, file drop, keymap, input routing;
+                 user chip + logout menu (opts.user / opts.onLogout / opts.storageKey)
+src/apps/*.js    apps: terminal, snake, notes, paint, readme, findman,
+                 mediamogul (Media House), gamemaker
 index.html       boots engine → login → shell (dynamic imports with ?v= cache-bust)
 bench.html       standalone perf benchmark
+worker/index.js  Cloudflare Worker entry (serves ASSETS; /api/* lands here later)
+wrangler.jsonc   Cloudflare config (assets from repo root, no build)
 .claude/devserver.py   dev server with Cache-Control: no-store
 .claude/launch.json    preview config (python3 devserver.py 8765 0.0.0.0)
 ```
+
+> App labels vs. ids: `findman` is labeled **"Findman Dick"** (a Feynman pun);
+> `mediamogul` is labeled **"Media House"**. Use the *id* in code/handoffs.
 
 ## Conventions
 - **App contract:** `export function createApp(initialCtx, win)` returns
@@ -46,10 +65,14 @@ bench.html       standalone perf benchmark
   LOCAL to the window content area. Apps DON'T subscribe to engine input — the
   shell routes events to the focused app's handlers. Apps DON'T call
   `engine.clear()` / `engine.start()`.
-- **Shared FS singleton:** `const fs = globalThis.__aciiFS ||= createFS({ storageKey: 'acii.fs.v1' })`.
-  Every app that touches files uses this exact line. **Boot pre-creates this
-  singleton with the active user's key** (`users.fsKey(user)`) BEFORE importing
-  apps, so the `||=` adopts the per-user FS. The hardcoded key is the fallback.
+- **Shared singletons** (use these EXACT lines wherever needed, so every app
+  shares one instance):
+  - `const fs = globalThis.__aciiFS ||= createFS({ storageKey: 'acii.fs.v1' });`
+  - `const drafts = globalThis.__aciiDrafts ||= createDrafts();`
+  - `const user = globalThis.__aciiUser ||= createUser();`
+  **Boot pre-creates the FS singleton with the active account's key**
+  (`users.fsKey(user)`) BEFORE importing apps, so the `||=` adopts the per-user
+  FS. The hardcoded `acii.fs.v1` key is the fallback.
 - **Users / login:** `index.html` boots engine → `createLogin` → (on login)
   `bootShell(user)`. The built-in `default` account keeps the LEGACY keys
   (`acii.fs.v1` / `acii.shell.v2`); other accounts are namespaced by id
@@ -64,8 +87,11 @@ bench.html       standalone perf benchmark
   Never hardcode hex. `theme` is a signal — reading `.value` inside an effect
   subscribes; use `.peek()` in render loops.
 - **Engine drawing:** `put(x,y,ch,{fg,bg,bold})`, `text`, `box(…,{glyphSet:'border'|'borderDouble'|'borderRound'})`, `rect`.
+- **Pure-logic modules stay pure:** `vim.js`, `syntax.js`, `keymap.js` own no
+  engine/DOM state — they take input + a context snapshot and return data/intents
+  the host renders or executes. Keep them that way.
 - **No `Date.now()` / `Math.random()` in Workflow scripts** (they throw there).
-  Fine at app runtime in the browser.
+  Fine at app runtime in the browser (drafts/user use `Date.now()` deliberately).
 
 ## Engine input events
 - `onKey(e)`     `{ type:'down'|'up', key, code, ctrl, shift, alt, meta }`
@@ -75,14 +101,23 @@ bench.html       standalone perf benchmark
 - `onFileDrop(e)`    `{ x, y, files:[{name,type,size,asText(),asArrayBuffer(),asDataUrl()}] }`
 
 > Use `e.code === 'KeyW'` for letter shortcuts (macOS Option+letter yields a
-> symbol in `e.key`). See `keyIs()` in shell.js.
+> symbol in `e.key`). See `keyIs()` in `keymap.js` / `shell.js`.
+
+## Editing stack (Findman + Media House)
+- **Drafts:** every Findman edit auto-backs-up (debounced) to the shared drafts
+  store; reopening a file with a newer draft restores it; a real save clears it.
+- **Vim:** opt-in via `user.prefs.vimEnabled`. When on, Findman routes `onKey`
+  through `createVim()`; `:w` saves, `:q` closes; `F9` toggles the pref.
+- **Syntax:** `langForPath(path)` → lang, `highlight(text, lang)` → role spans,
+  `roleColor(role, colors)` maps roles to the active theme.
 
 ## Dev / preview
 - Start: `python3 .claude/devserver.py 8765 0.0.0.0` (or the `acii` launch config).
 - Preview tab is a background tab → RAF is throttled; FPS reads low there but is
   fine in a real foreground tab. Verify behavior via `preview_eval` against the
   DOM (`.acii-row` / `.acii-cell` text), not just screenshots (the screenshot
-  tool has lagged in this project).
+  tool has lagged in this project). `window.engine` / `window.shell` /
+  `window.shell.fs` are exposed for console poking.
 - After editing modules, a plain reload suffices (no-store). If a module seems
   stale, the HTTP disk cache from before no-store can persist — bump the `?v=`
   or restart the preview server.
@@ -94,8 +129,11 @@ bench.html       standalone perf benchmark
   occlude the hint; context menu renders last, on top).
 - Maximized window: close `×` is at the far-right cell; hit-test widened so the
   corner counts. Double-click title toggles maximize even while maximized.
+- iOS safe-area insets aren't resolved on the first frame — `index.html`
+  recomputes the grid after a delay / on `orientationchange`.
 
 ## Workflow usage
 Big multi-file feature work has been done via the Workflow tool (parallel
 sub-agents, one new file each, no shared edits). Keep that pattern: foundation
-modules first, then apps that consume them. Integrate + verify on the main thread.
+modules first (signals → engine → fs/user/drafts → vim/syntax/keymap), then apps
+that consume them. Integrate + verify on the main thread.
