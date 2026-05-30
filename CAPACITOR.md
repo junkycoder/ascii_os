@@ -35,9 +35,10 @@ moduly; Capacitor je jen nativní obal navíc.
    web nepotřebuje build a `src/mobile.js` se načte i bez Capacitoru.
 3. **`www/` je build výstup** (assembled), **ne ručně editovaný zdroj**.
    Generuje ho `tools/build-www.mjs`. `www/` je v `.gitignore`.
-4. **Capacitor je dev/CI závislost** — `package.json` + `node_modules` +
-   `ios/` nativní projekt. Vše v `.gitignore` kromě `package.json`,
-   `capacitor.config.json` a build skriptu.
+4. **Capacitor je dev/CI závislost** — `package.json` + `node_modules`.
+   `node_modules` + `www/` jsou v `.gitignore`. Nativní `ios/` projekt je
+   **commitnutý** (kvůli Xcode Cloud, viz §8); ignorují se jen jeho generované
+   části přes `ios/.gitignore`.
 
 ---
 
@@ -52,8 +53,10 @@ tools/gen-app-assets.sh      # generátor ikony + splash masterů (ImageMagick, 
 assets/ios/                  # (commitnuto) icon-1024.png + splash-2732.png — brand mastery
 src/mobile.js                # browser-safe Capacitor integrace (no-op v prohlížeči)
 www/                         # (generováno, .gitignore) statický web pro cap copy
-ios/                         # (generováno přes `npx cap add ios`, .gitignore)
-.gitignore                   # + node_modules, www, /ios (root-anchored, ne assets/ios)
+ios/                         # nativní projekt — COMMITNUTÝ (Xcode Cloud, §8);
+                             #   generované části ignoruje ios/.gitignore
+ios/App/ci_scripts/          # Xcode Cloud hooky: ci_post_clone + ci_pre_xcodebuild
+.gitignore                   # node_modules + www (ios/ se už neignoruje)
 ```
 
 ### 3.0 Ikona + splash (`assets/ios/`, `tools/gen-app-assets.sh`)
@@ -142,3 +145,80 @@ Při změně webu pak stačí `npm run sync` (nebo `npm run copy` bez změny plu
 - [ ] Nainstalovat CocoaPods (chybí na stroji)
 - [ ] `npm install` → `npm run ios:add` → `npm run sync` → Run v Xcode
       (na macOS s CocoaPods)
+- [x] Nativní `ios/` **commitnut** + Xcode Cloud CI (viz §8)
+
+---
+
+## 7. Magic-link deeplink (Universal Links + custom scheme)
+
+Login je e-mail + **magic link** (viz `HANDOFF.md`). Odkaz `os.fakan.cz/auth?token=…`
+má na iOS otevřít appku, ne Safari.
+
+- **Universal Links** — worker servíruje `/.well-known/apple-app-site-association`
+  (sestaven z `IOS_TEAM_ID` + `cz.fakan.os`, cesty `/auth*`). V Xcode je potřeba
+  zapnout **Associated Domains** (Signing & Capabilities → `applinks:os.fakan.cz`)
+  — vyžaduje Apple Team / provisioning profil. `IOS_TEAM_ID` se nastaví ve
+  `wrangler.jsonc`.
+- **Custom scheme `fakanos://`** — fallback. `tools/ios-postsync.mjs` ho zapíše
+  do `Info.plist` (`CFBundleURLTypes`) při každém `npm run sync` a (pokud existuje
+  `App.entitlements`) doplní i associated-domain entitlement.
+- **Záchyt v JS** — `src/mobile.js` poslouchá `App` plugin (`getLaunchUrl` +
+  `appUrlOpen`), vytáhne `token` z URL a předá ho boot flow přes
+  `globalThis.__aciiHandleAuthToken` (cold start → `__aciiPendingAuthToken`).
+- **@capacitor/app** plugin už je v `package.json` deps — `appUrlOpen` jde odtud.
+
+---
+
+## 8. Xcode Cloud → TestFlight (automatický iOS build)
+
+Cíl: každý push relevantní větve postaví v cloudu IPA a nahraje ji na
+**TestFlight**. Apple builduje **přímo z gitu**, takže nativní `ios/` projekt je
+nově **commitnutý** (dřív `.gitignore`). Generované části (`Pods/`, `www` →
+`App/App/public`, node config, `build/`, `DerivedData`, `xcuserdata`) zůstávají
+ignorované přes `ios/.gitignore` a CI si je vyrobí samo.
+
+### Co je v repu (hotovo, verzováno)
+- `ios/` nativní projekt: `App.xcodeproj`, `App.xcworkspace`, `App/` zdroje,
+  `Info.plist`, `Assets.xcassets` (brandovaná ikona + splash), `Podfile(.lock)`.
+- **Sdílené schéma** `ios/App/App.xcodeproj/xcshareddata/xcschemes/App.xcscheme`
+  — Xcode Cloud bez shared scheme workflow nezaложí.
+- **CI skripty** (`ios/App/ci_scripts/`, executable bit v gitu = `100755`):
+  - `ci_post_clone.sh` — `brew install cocoapods node@20`, `npm ci`,
+    `npm run sync` (build `www/` → `cap sync ios` = kopie webu + `pod install`
+    → `ios-postsync` = ikona/splash + `Info.plist` patche).
+  - `ci_pre_xcodebuild.sh` — `agvtool new-version -all $CI_BUILD_NUMBER`, takže
+    každý upload na TestFlight má unikátní, rostoucí build number.
+- `project.pbxproj`: `VERSIONING_SYSTEM = apple-generic` (nutné pro `agvtool`),
+  `CODE_SIGN_STYLE = Automatic`, `DEVELOPMENT_TEAM = C8W48M2X85`,
+  bundle `cz.fakan.os`, `MARKETING_VERSION 1.0` (zvedat ručně u reálné verze).
+
+### Manuální kroky v App Store Connectu (jednorázově — vyžadují Apple účet)
+Tohle z gitu nejde, musí člověk přihlášený do Apple Developer programu (team
+`C8W48M2X85`):
+1. **App Store Connect → Apps → +** → nová app, platform iOS, bundle
+   `cz.fakan.os` (pokud App Record ještě není; bundle ID případně založ v
+   *Certificates, IDs & Profiles*).
+2. **Xcode Cloud** zapni buď v Xcode (Product → Xcode Cloud → Create Workflow),
+   nebo v App Store Connect (Xcode Cloud → Get Started). Propoj GitHub repo
+   `junkycoder/ascii_os`, udělej grant přístupu Apple GitHub appce.
+3. **Workflow**:
+   - *Branch Changes* na `trunk` (start condition).
+   - Environment: **Xcode 16** (macOS image s Homebrew), scheme **App**.
+   - Action **Archive**, platform **iOS**.
+   - Post-action **TestFlight Internal Testing** (vyber interní skupinu testerů).
+4. **Signing**: nech `Automatic` — Xcode Cloud podepisuje cloud-managed
+   certifikátem/profilem sám, není třeba lokální `.p12`.
+5. První build spusť ručně (Start Build) a ověř log `ci_post_clone` (brew/npm)
+   + že archive doběhne a objeví se na TestFlightu.
+
+### macOS poznámka
+Capacitor nemá nativní macOS target — appka je iOS. Na Mac se dostane přes
+**„Mac (Designed for iPad)"**: v App Store Connectu u TestFlightu zaškrtni
+dostupnost pro Apple Silicon Mac; běží tatáž iOS binárka, žádný extra build ani
+target (a žádná změna v repu). Pravý nativní mac build by znamenal jinou cestu
+(Electron) a Xcode Cloud workflow by se ho netýkal.
+
+### Lokální ověření před spoléháním na CI
+`npm run sync` potřebuje **Node ≥ 18** (Capacitor 6 CLI) + CocoaPods na PATH —
+lokálně přes nvm `node v22` a `LANG=en_US.UTF-8` (jinak padá pod/Node). V CI to
+řeší `ci_post_clone.sh` (brew node@20). Po `sync` jde `npm run ios:open` a Run.

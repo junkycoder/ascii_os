@@ -912,7 +912,7 @@ export function createShell(engine, opts = {}) {
     engine.rect(0, y, cols, 1, { ch: ' ', bg: t.colors.border });
 
     // Left segment: brand + clock
-    const brand = ' acii_os ';
+    const brand = ' FakanOS ';
     engine.text(0, y, brand, { fg: t.colors.bg, bg: t.colors.accent, bold: true });
     let cur = brand.length + 1;
 
@@ -964,7 +964,7 @@ export function createShell(engine, opts = {}) {
       const ux = userChipX();
       if (px >= ux && px < ux + userChipText().length) return { kind: 'user' };
     }
-    let cur = ' acii_os '.length + 1;
+    let cur = ' FakanOS '.length + 1;
     for (const r of running.values()) {
       const chip = wm.isMinimized(r.win.id)
         ? ` ${r.spec.icon || '[]'} (${r.spec.label}) `
@@ -973,18 +973,6 @@ export function createShell(engine, opts = {}) {
       cur += chip.length + 1;
     }
     return null;
-  }
-
-  // ── Hint banner (single line at top of mode info / shortcuts) ────
-  function renderHint() {
-    const mode = engine.mode.peek();
-    if (mode === 'watch') return;
-    const y = taskbarPos.peek() === 'top' ? 1 : 0;
-    const t = engine.theme.peek();
-    const hint = ` ${mode}  ·  Alt+Tab swap  ·  Ctrl+W close  ·  Esc unmax  ·  Ctrl+T theme  ·  Alt+W widget+  ·  fps ${engine.fps.peek()} `;
-    if (y === 0) {
-      engine.text(engine.cols.peek() - hint.length - 1, y, hint, { fg: t.colors.fgDim });
-    }
   }
 
   // ── Input routing ───────────────────────────────────────────────
@@ -1606,7 +1594,6 @@ export function createShell(engine, opts = {}) {
     renderIcons();
     renderFileIcons();      // /desktop/* files
     renderMarquee();        // rubber-band selection box over the desktop
-    renderHint();           // BEFORE wm so windows occlude it
     wm.render();
     renderTaskbar();
     renderActiveMenu();     // context menu always on top

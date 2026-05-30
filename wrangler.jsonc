@@ -20,7 +20,22 @@
   // custom_domain:true makes Cloudflare manage the DNS record + TLS cert.
   "routes": [
     { "pattern": "os.fakan.cz", "custom_domain": true }
-  ]
+  ],
+
+  // ── Auth (email + magic-link) ────────────────────────────────────────────
+  // KV holds short-lived magic tokens + long-lived sessions + user records.
+  // RESEND_API_KEY is a SECRET — set it with: wrangler secret put RESEND_API_KEY
+  "kv_namespaces": [
+    { "binding": "AUTH", "id": "482597e7e15f465cbf7e8d5066c2a3c6" }
+  ],
+  "vars": {
+    "APP_URL": "https://os.fakan.cz",
+    "MAIL_FROM": "acii_os <login@fakan.cz>",
+    // Apple Team ID for the AASA appID (os.fakan.cz/auth → cz.fakan.os).
+    // Find it at developer.apple.com/account → Membership. Empty = AASA still
+    // served, but iOS universal links won't validate until this is set.
+    "IOS_TEAM_ID": ""
+  }
 
   // ── DB (later) ──────────────────────────────────────────────────────────
   // "d1_databases": [

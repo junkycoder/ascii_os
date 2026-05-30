@@ -28,14 +28,27 @@ Verified functional end-to-end:
 - **System user** (`user.js`) — single system user owns settings/preferences
   (`vimEnabled`, `quicklook`, …) persisted to `acii.user.v1`. Shared singleton
   `globalThis.__aciiUser`.
-- **Accounts + login** (`users.js` + `login.js`) — account store + session with
-  salted-hash passwords (a TOY hash, not real security) and **per-user storage
-  keys** (the `default` account keeps the legacy `acii.fs.v1` / `acii.shell.v2`;
-  others namespaced `…::<id>`). `index.html` boots engine → ASCII login screen →
-  `bootShell(user)`; the shell shows a taskbar user chip with switch-user /
-  logout. Boot pre-creates the FS singleton with `users.fsKey(user)` so each
-  account gets its own FS + desktop. New-user / delete use `window.prompt/confirm`
-  (don't run in headless preview; fine in a real browser).
+- **Auth + login — email + magic link** (`auth.js` + `login.js` + `worker/index.js`).
+  Replaces the old local `users.js` account store (deleted). `login.js` collects
+  **email + username** and POSTs `/api/auth/request`; the worker stores a
+  single-use token in **Cloudflare KV** (binding `AUTH`, 15-min TTL) and emails a
+  link `os.fakan.cz/auth?token=…` via **Resend**. Opening the link →
+  `login.signIn(token)` → `/api/auth/verify` consumes the token, upserts the
+  user, and returns a **long-lived session** (~1 year KV TTL) stored in
+  `localStorage` (`acii.session.v3`). Boot shows the shell straight from the
+  cached session and revalidates via `/api/auth/me` in the background (offline →
+  trust cache; 401 → reload to login). Per-user FS/shell keys are namespaced by
+  the server user id (`acii.fs.v1::<id>`). Logout = `auth.clearSession()` +
+  reload. **Verified end-to-end locally via `wrangler dev`** (request→KV→Resend,
+  verify→session, me, single-use enforcement, throttle, AASA, `/auth`→SPA). The
+  python devserver only serves static files, so the login UI renders there but
+  the API 404s — exercise auth via `wrangler dev` or a `trunk` deploy.
+- **iOS deeplink** — worker serves `/.well-known/apple-app-site-association`
+  (built from `env.IOS_TEAM_ID` + `cz.fakan.os`, paths `/auth*`);
+  `tools/ios-postsync.mjs` registers the `fakanos://` custom-scheme fallback and
+  (if an entitlements file exists) the `applinks:os.fakan.cz` associated domain;
+  `mobile.js` catches `appUrlOpen` / launch URL and feeds the token to
+  `__aciiHandleAuthToken`.
 - **Drafts** (`drafts.js`) — last unsaved edit per path, debounced to
   localStorage; restored on reopen, cleared on real save. Shared singleton
   `globalThis.__aciiDrafts`.
@@ -88,6 +101,22 @@ menu, or spacebar (Quick-Look) on the selection.
   no-ops in a plain browser; safe-area handled in `index.html`. See `CAPACITOR.md`.
 
 ## OPEN / next priorities
+
+0. **Magic-link go-live — manual steps (code is done + verified locally):**
+   - **Resend:** create an account, verify the `fakan.cz` sending domain
+     (DNS records), then `wrangler secret put RESEND_API_KEY`. Confirm
+     `MAIL_FROM` in `wrangler.jsonc` matches a verified sender.
+   - **Deploy:** push to `trunk` (auto-deploy) or `npx wrangler deploy`; the KV
+     namespace `AUTH` (id `482597e7e15f465cbf7e8d5066c2a3c6`) is already created
+     and bound. Then send yourself a link end-to-end on `os.fakan.cz`.
+   - **iOS universal links:** set `IOS_TEAM_ID` in `wrangler.jsonc` (Apple Team
+     ID from developer.apple.com → Membership) so the AASA `appID` validates.
+     In Xcode: Signing & Capabilities → **+ Associated Domains** →
+     `applinks:os.fakan.cz` (needs the Team / a provisioning profile). Re-run
+     `npm run sync` so `ios-postsync.mjs` re-applies the `fakanos://` scheme +
+     entitlement. Test by opening a magic link on the device → app opens + signs in.
+   - **Compat date:** local `wrangler dev` needs `--compatibility-date 2026-05-22`
+     until the local wrangler binary catches up (CI pins 4.95.0, which is fine).
 
 1. **Leader-key scheme not wired.** `src/keymap.js` (a full leader + Quick-Look
    routing module) exists but **nothing imports it**. The shell currently does

@@ -22,7 +22,12 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const ASSETS = join(ROOT, 'assets', 'ios');
 const XCASSETS = join(ROOT, 'ios', 'App', 'App', 'Assets.xcassets');
 const PLIST = join(ROOT, 'ios', 'App', 'App', 'Info.plist');
+const ENTITLEMENTS = join(ROOT, 'ios', 'App', 'App', 'App.entitlements');
 const PB = '/usr/libexec/PlistBuddy';
+
+// Magic-link deeplink config (kept in sync with worker AASA + src/auth.js).
+const URL_SCHEME = 'fakanos';
+const APP_DOMAIN = 'os.fakan.cz';
 
 function log(...a) { console.log('[ios-postsync]', ...a); }
 
@@ -80,6 +85,42 @@ function setString(key, value) {
   log(`set ${key} = ${value}`);
 }
 
+// Run a PlistBuddy command against a file, swallowing errors (used for the
+// idempotent Delete-before-Add dance below).
+function pbTry(file, cmd) {
+  try { execFileSync(PB, ['-c', cmd, file], { stdio: 'pipe' }); return true; }
+  catch (_) { return false; }
+}
+
+// Register the custom URL scheme (fakanos://auth?token=…) as a magic-link
+// fallback for when universal links don't open the app (e.g. opened from a
+// context where iOS won't honor the associated domain). Rebuilt each run.
+function setUrlScheme() {
+  pbTry(PLIST, 'Delete :CFBundleURLTypes');
+  pbTry(PLIST, 'Add :CFBundleURLTypes array');
+  pbTry(PLIST, 'Add :CFBundleURLTypes:0 dict');
+  pbTry(PLIST, 'Add :CFBundleURLTypes:0:CFBundleURLName string cz.fakan.os');
+  pbTry(PLIST, 'Add :CFBundleURLTypes:0:CFBundleURLSchemes array');
+  pbTry(PLIST, `Add :CFBundleURLTypes:0:CFBundleURLSchemes:0 string ${URL_SCHEME}`);
+  log(`set URL scheme = ${URL_SCHEME}://`);
+}
+
+// Associated Domains entitlement for universal links (applinks:os.fakan.cz).
+// Only patches an existing entitlements file — creating one also needs the
+// CODE_SIGN_ENTITLEMENTS build setting + the Associated Domains capability
+// enabled in Xcode (requires the Apple Team / a provisioning profile), which
+// is a manual one-time step. See CAPACITOR.md.
+function setAssociatedDomains() {
+  if (!existsSync(ENTITLEMENTS)) {
+    log('skip associated-domains: no App.entitlements — enable "Associated Domains" in Xcode (Signing & Capabilities) →', `applinks:${APP_DOMAIN}`);
+    return;
+  }
+  pbTry(ENTITLEMENTS, 'Delete :com.apple.developer.associated-domains');
+  pbTry(ENTITLEMENTS, 'Add :com.apple.developer.associated-domains array');
+  pbTry(ENTITLEMENTS, `Add :com.apple.developer.associated-domains:0 string applinks:${APP_DOMAIN}`);
+  log(`set associated-domains = applinks:${APP_DOMAIN}`);
+}
+
 // Status bar hidden from launch; opt out of per-view-controller appearance so
 // the Info.plist value actually wins.
 setBool('UIStatusBarHidden', true);
@@ -88,5 +129,9 @@ setBool('UIViewControllerBasedStatusBarAppearance', false);
 // Home-screen label. The cap template ships CFBundleDisplayName = appName from
 // the time of `cap add ios`; pin it here so renames survive regeneration.
 setString('CFBundleDisplayName', 'FakanOS');
+
+// Magic-link deeplink wiring.
+setUrlScheme();
+setAssociatedDomains();
 
 log('done →', PLIST);

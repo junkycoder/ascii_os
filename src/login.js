@@ -1,105 +1,78 @@
-// acii_os login screen — pick an account, enter a password, or create one.
+// acii_os login screen — email + username, magic-link sign-in.
 //
 // Renders straight into the engine grid (like the shell) and owns its own
-// input handlers while active. Call onLogin(user) fires once on success; the
-// boot flow then tears the login down and starts the shell for that user.
+// input handlers while active. The flow:
+//
+//   1. user types email + username, hits [ Send magic link ]
+//   2. createLogin POSTs /api/auth/request → server emails a one-time link
+//   3. screen flips to a "check your inbox" state
+//   4. the user opens the link (web tab or, on iOS, the app via universal link)
+//      → index.html / mobile.js extract the token and call login.signIn(token)
+//   5. on success onLogin(session.user) fires; the boot flow starts the shell
 //
 //   const login = createLogin(engine, { onLogin(user){…} });
+//   // a token arriving out of band (URL / deeplink):
+//   await login.signIn(token);
 //   // …later, before booting the shell:
 //   login.destroy();
 //
 // Layout is recomputed every frame from cols/rows and stashed so the mouse /
 // touch handlers can hit-test the same tiles the renderer drew.
 
-import * as users from './users.js';
+import * as auth from './auth.js';
 
-const TILE_W = 10;
-const TILE_BOX_H = 4;
-const SLOT_W = TILE_W + 2;   // tile + 1-cell gutter each side overlap
-const SLOT_H = TILE_BOX_H + 2; // box + label row + gap
+const FIELD_EMAIL = 0;
+const FIELD_NAME = 1;
+const FIELD_BTN = 2;
+const FIELD_GUEST = 3;
+const FIELD_COUNT = 4;
+
+function isEmail(s) { return /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(String(s || '').trim()); }
 
 export function createLogin(engine, opts = {}) {
   const onLogin = opts.onLogin || (() => {});
 
-  let people = users.list();          // [{id,name,glyph,color,hasPassword}]
-  let sel = pickInitial();            // index into tiles (people.length == "new")
-  let password = '';
+  let email = '';
+  let username = '';
+  let focus = FIELD_EMAIL;
+  let phase = 'form';          // 'form' | 'sending' | 'sent' | 'verifying'
   let error = '';
   let done = false;
-  let layout = null;                  // last computed layout for hit-testing
-
-  function tiles() { return people.length + 1; }   // +1 for the "new" tile
-  function isNewTile(i) { return i === people.length; }
-  function selUser() { return isNewTile(sel) ? null : people[sel]; }
-
-  function pickInitial() {
-    // Prefer the last session's user if it is still around.
-    const s = users.getSession();
-    if (s) {
-      const i = people.findIndex(u => u.id === s.id);
-      if (i >= 0) return i;
-    }
-    return people.length ? 0 : 0;
-  }
-
-  function refresh() { people = users.list(); }
+  let layout = null;
 
   // ── layout ──────────────────────────────────────────────────────
   function computeLayout() {
     const cols = engine.cols.peek();
     const rows = engine.rows.peek();
-    const list = tiles();
 
-    const panelW = Math.min(cols - 2, Math.max(40, 12 + 4));
-    const innerW = Math.min(cols - 2, Math.max(panelW, 42));
-    const W = Math.min(cols - 2, Math.max(44, innerW));
-    const perRow = Math.max(1, Math.floor((W - 2) / SLOT_W));
-    const tileRows = Math.max(1, Math.ceil(list / perRow));
-
-    const selHasPw = !isNewTile(sel) && people[sel] && people[sel].hasPassword;
-
-    // Vertical content plan (rows inside the panel):
-    //   title(1) gap(1) [tiles] gap(1) pw(1) gap(1) button(1) gap(1) hint(1)
-    const tilesH = tileRows * SLOT_H;
-    const innerH = 1 + 1 + tilesH + 1 + 1 + 1 + 1 + 1 + 1;
-    const H = innerH + 2; // borders
+    const W = Math.min(cols - 2, Math.max(44, Math.min(54, cols - 4)));
+    // Vertical plan inside the panel:
+    //   title(1) gap(1) blurb(1) gap(1) email-lbl(1) email(1) gap(1)
+    //   name-lbl(1) name(1) gap(1) button(1) gap(1) guest(1) gap(1) hint(1)
+    const innerH = 15;
+    const H = innerH + 2;
 
     const px = Math.max(0, Math.floor((cols - W) / 2));
     const py = Math.max(0, Math.floor((rows - H) / 2));
 
-    // Tile grid origin, centered horizontally inside the panel.
-    const gridW = perRow * SLOT_W;
-    const gx = px + Math.max(1, Math.floor((W - gridW) / 2));
-    const titleY = py + 1;
-    const gy = titleY + 2;
-
-    const tileRects = [];
-    for (let i = 0; i < list; i++) {
-      const r = Math.floor(i / perRow);
-      const cInRow = i % perRow;
-      // center the (possibly short) last row
-      const inThisRow = Math.min(perRow, list - r * perRow);
-      const rowW = inThisRow * SLOT_W;
-      const rowX = px + Math.max(1, Math.floor((W - rowW) / 2));
-      const x = rowX + cInRow * SLOT_W + 1;
-      const y = gy + r * SLOT_H;
-      tileRects.push({ x, y, w: TILE_W, h: TILE_BOX_H + 1, index: i });
-    }
-
-    const pwY = gy + tilesH + 1;
-    const btnY = pwY + 2;
-    const hintY = btnY + 2;
-
-    const btnLabel = isNewTile(sel) ? '[ Create account ]'
-      : (selHasPw ? '[ Unlock ]' : '[ Log in ]');
-    const btnX = px + Math.max(1, Math.floor((W - btnLabel.length) / 2));
+    const x = px + 3;
+    const fieldW = W - 6;
+    let y = py + 1;
+    const titleY = y; y += 2;
+    const blurbY = y; y += 2;
+    const emailLblY = y; y += 1;
+    const emailY = y; y += 2;
+    const nameLblY = y; y += 1;
+    const nameY = y; y += 2;
+    const btnY = y; y += 2;
+    const guestY = y; y += 2;
+    const hintY = y;
 
     return {
-      px, py, W, H, titleY,
-      tiles: tileRects,
-      pwY, pwX: px + 2, pwW: W - 4, selHasPw,
-      btn: { x: btnX, y: btnY, w: btnLabel.length, label: btnLabel },
-      hintY,
+      px, py, W, H, titleY, blurbY,
+      emailLblY, emailY, nameLblY, nameY,
+      x, fieldW,
+      btnY, guestY, hintY,
     };
   }
 
@@ -112,63 +85,87 @@ export function createLogin(engine, opts = {}) {
     const rows = engine.rows.peek();
 
     engine.clear();
-    // Dim backdrop fill.
     engine.rect(0, 0, cols, rows, { ch: ' ', fg: c.fg, bg: c.bg });
-    // Faint pattern so it doesn't read as a flat void.
-    for (let y = 0; y < rows; y += 3) {
-      for (let x = 0; x < cols; x += 4) engine.put(x, y, '·', { fg: c.border });
+    for (let yy = 0; yy < rows; yy += 3) {
+      for (let xx = 0; xx < cols; xx += 4) engine.put(xx, yy, '·', { fg: c.border });
     }
 
     const L = layout = computeLayout();
 
-    // Panel
     engine.rect(L.px, L.py, L.W, L.H, { ch: ' ', fg: c.fg, bg: c.bg });
     engine.box(L.px, L.py, L.W, L.H, { fg: c.border, glyphSet: 'borderDouble' });
 
-    // Title
     const title = 'a c i i _ o s';
-    engine.text(L.px + Math.floor((L.W - title.length) / 2), L.titleY, title,
-      { fg: c.accent, bold: true });
+    engine.text(L.px + Math.floor((L.W - title.length) / 2), L.titleY, title, { fg: c.accent, bold: true });
 
-    // Tiles
-    for (const r of L.tiles) {
-      const isSel = r.index === sel;
-      const isNew = isNewTile(r.index);
-      const u = isNew ? null : people[r.index];
-      const bd = isSel ? c.borderFocus : c.border;
-      const face = isSel ? c.bg : c.bg;
-      drawTile(r.x, r.y, isNew ? '+' : (u.glyph || '☺'),
-        isNew ? c.fgDim : (c[u.color] || c.accent), bd, face, isSel);
-      const label = isNew ? 'new' : (u.name || u.id);
-      const lbl = label.length > TILE_W ? label.slice(0, TILE_W - 1) + '…' : label;
-      const lx = r.x + Math.max(0, Math.floor((TILE_W - lbl.length) / 2));
-      engine.text(lx, r.y + TILE_BOX_H, lbl, { fg: isSel ? c.fg : c.fgDim, bold: isSel });
-      if (u && u.hasPassword) engine.put(r.x + TILE_W - 1, r.y, '🔒', { fg: c.fgDim });
-    }
+    if (phase === 'sent') return renderSent(L, c);
+    if (phase === 'verifying') return renderBusy(L, c, 'signing you in…');
 
-    // Password / status row
-    const u = selUser();
-    if (isNewTile(sel)) {
-      centerText(L, L.pwY, 'create a new account', c.fgDim);
-    } else if (L.selHasPw) {
-      const masked = '•'.repeat(Math.min(password.length, L.pwW - 12));
-      const field = 'password: ' + (masked || '_');
-      engine.text(L.pwX, L.pwY, field.slice(0, L.pwW), { fg: c.fg });
-    } else {
-      centerText(L, L.pwY, 'no password — press Enter', c.fgDim);
-    }
+    centerText(L, L.blurbY, 'sign in with your email — we\'ll send a magic link', c.fgDim);
 
-    // Error (overrides hint colour line just below pw if present)
+    // Email field
+    engine.text(L.x, L.emailLblY, 'email', { fg: focus === FIELD_EMAIL ? c.accent : c.fgDim, bold: focus === FIELD_EMAIL });
+    drawField(L, L.emailY, email, focus === FIELD_EMAIL, c, 'you@example.com');
+
+    // Username field
+    engine.text(L.x, L.nameLblY, 'username', { fg: focus === FIELD_NAME ? c.accent : c.fgDim, bold: focus === FIELD_NAME });
+    drawField(L, L.nameY, username, focus === FIELD_NAME, c, 'display name');
+
     // Button
-    const onBtn = false;
-    engine.text(L.btn.x, L.btn.y, L.btn.label, { fg: c.accent, bold: true });
+    const busy = phase === 'sending';
+    const label = busy ? '[ sending… ]' : '[ Send magic link ]';
+    const bx = L.px + Math.floor((L.W - label.length) / 2);
+    engine.text(bx, L.btnY, label, { fg: focus === FIELD_BTN && !busy ? c.bg : c.accent, bg: focus === FIELD_BTN && !busy ? c.accent : undefined, bold: true });
+    layout.btn = { x: bx, y: L.btnY, w: label.length };
 
-    // Hint / error
-    if (error) {
-      centerText(L, L.hintY, '✗ ' + error, c.error);
+    drawGuest(L, c);
+
+    if (error) centerText(L, L.hintY, '✗ ' + error, c.error);
+    else centerText(L, L.hintY, 'Tab switch · Enter send · type to edit', c.fgDim);
+  }
+
+  // The guest button is shared by the form and the "sent" screen — a no-email,
+  // local-only sign-in.
+  function drawGuest(L, c) {
+    const label = '· continue as guest ·';
+    const gx = L.px + Math.floor((L.W - label.length) / 2);
+    const foc = focus === FIELD_GUEST;
+    engine.text(gx, L.guestY, label, { fg: foc ? c.bg : c.link, bg: foc ? c.link : undefined, bold: foc });
+    layout.guestBtn = { x: gx, y: L.guestY, w: label.length };
+  }
+
+  function renderSent(L, c) {
+    centerText(L, L.blurbY, '✓ link sent', c.success, true);
+    centerText(L, L.emailLblY + 1, 'check your inbox at', c.fgDim);
+    centerText(L, L.emailY, email, c.fg, true);
+    centerText(L, L.nameY, 'open the link to finish signing in', c.fgDim);
+    const label = '[ use a different email ]';
+    const bx = L.px + Math.floor((L.W - label.length) / 2);
+    engine.text(bx, L.btnY, label, { fg: c.link });
+    layout.btn = { x: bx, y: L.btnY, w: label.length };
+    drawGuest(L, c);
+    if (error) centerText(L, L.hintY, '✗ ' + error, c.error);
+  }
+
+  function renderBusy(L, c, msg) {
+    centerText(L, L.blurbY + 2, msg, c.accent, true);
+    layout.btn = null;
+  }
+
+  function drawField(L, y, value, active, c, placeholder) {
+    const bd = active ? c.borderFocus : c.border;
+    engine.text(L.x, y, '[', { fg: bd });
+    engine.text(L.x + L.fieldW - 1, y, ']', { fg: bd });
+    const inner = L.fieldW - 2;
+    const ix = L.x + 1;
+    engine.text(ix, y, ' '.repeat(inner), { fg: c.fg });
+    if (!value && !active) {
+      engine.text(ix, y, placeholder.slice(0, inner), { fg: c.fgDim });
     } else {
-      const hint = '←→ select · Enter confirm · type password · Del removes';
-      centerText(L, L.hintY, hint.slice(0, L.W - 2), c.fgDim);
+      let shown = value;
+      if (shown.length > inner - (active ? 1 : 0)) shown = shown.slice(shown.length - (inner - (active ? 1 : 0)));
+      engine.text(ix, y, shown, { fg: c.fg });
+      if (active) engine.put(ix + Math.min(shown.length, inner - 1), y, '_', { fg: c.accent, bold: true });
     }
   }
 
@@ -177,149 +174,128 @@ export function createLogin(engine, opts = {}) {
     engine.text(L.px + Math.floor((L.W - s.length) / 2), y, s, { fg, bold });
   }
 
-  function drawTile(x, y, glyph, glyphFg, borderFg, faceBg, sel) {
-    const g = engine.theme.peek().glyphs[sel ? 'borderRound' : 'border'];
-    const inner = TILE_W - 2;
-    engine.text(x, y, g.tl + g.h.repeat(inner) + g.tr, { fg: borderFg, bold: sel });
-    for (let r = 1; r < TILE_BOX_H - 1; r++) {
-      engine.put(x, y + r, g.v, { fg: borderFg });
-      engine.text(x + 1, y + r, ' '.repeat(inner), { fg: borderFg, bg: faceBg });
-      engine.put(x + TILE_W - 1, y + r, g.v, { fg: borderFg });
-    }
-    engine.text(x, y + TILE_BOX_H - 1, g.bl + g.h.repeat(inner) + g.br, { fg: borderFg, bold: sel });
-    const gx = x + Math.floor((TILE_W - 1) / 2);
-    const gy = y + Math.floor(TILE_BOX_H / 2);
-    engine.put(gx, gy, glyph, { fg: glyphFg, bg: faceBg, bold: true });
-  }
-
   // ── actions ─────────────────────────────────────────────────────
-  function moveSel(d) {
-    const n = tiles();
-    sel = (sel + d + n) % n;
-    password = '';
-    error = '';
+  function resetForm() {
+    phase = 'form'; error = ''; focus = FIELD_EMAIL;
   }
 
-  function submit() {
-    if (done) return;
-    if (isNewTile(sel)) { createFlow(); return; }
-    const u = people[sel];
-    if (!u) return;
-    if (u.hasPassword && !users.verify(u.id, password)) {
-      error = 'wrong password';
-      password = '';
-      return;
+  async function submit() {
+    if (done || phase === 'sending' || phase === 'verifying') return;
+    if (phase === 'sent') { resetForm(); return; }
+    if (!isEmail(email)) { error = 'enter a valid email'; focus = FIELD_EMAIL; return; }
+    if (username.trim().length < 2) { error = 'pick a username (2+ chars)'; focus = FIELD_NAME; return; }
+    error = '';
+    phase = 'sending';
+    try {
+      await auth.requestLink({ email, username });
+      phase = 'sent';
+    } catch (e) {
+      phase = 'form';
+      error = (e && e.message) || 'could not send link';
     }
-    finishLogin(u);
   }
 
-  function finishLogin(u) {
+  // Exchange a magic-link token for a session (called by index.html / mobile.js
+  // when a token arrives via the URL or an iOS deeplink). Resolves to the user
+  // on success; surfaces an error on the login screen otherwise.
+  async function signIn(token) {
+    if (done) return null;
+    error = '';
+    phase = 'verifying';
+    try {
+      const session = await auth.verify(token);
+      finishLogin(session.user);
+      return session.user;
+    } catch (e) {
+      phase = 'form';
+      error = (e && e.message) || 'link expired — request a new one';
+      return null;
+    }
+  }
+
+  function finishLogin(user) {
     done = true;
-    users.setSession(u.id);
-    try { onLogin(u); } catch (e) { console.error('onLogin', e); }
+    try { onLogin(user); } catch (e) { console.error('onLogin', e); }
   }
 
-  function createFlow() {
-    const name = window.prompt('Jméno nového uživatele:', '');
-    if (name == null) return;
-    const trimmed = String(name).trim();
-    if (!trimmed) return;
-    const pw = window.prompt('Heslo (nech prázdné pro účet bez hesla):', '');
-    if (pw == null) return; // cancelled
-    const created = users.create({ name: trimmed, password: pw || null });
-    refresh();
-    const i = people.findIndex(p => p.id === created.id);
-    sel = i >= 0 ? i : 0;
-    password = '';
-    error = '';
-  }
-
-  function deleteFlow() {
-    if (isNewTile(sel)) return;
-    const u = people[sel];
-    if (!u) return;
-    if (users.count() <= 1) { error = 'cannot remove the last account'; return; }
-    const ok = window.confirm(`Opravdu smazat uživatele "${u.name}" včetně jeho dat?`);
-    if (!ok) return;
-    users.remove(u.id);
-    refresh();
-    sel = Math.min(sel, people.length); // clamp (stay valid, may land on "new")
-    if (sel > people.length) sel = people.length;
-    if (sel >= tiles()) sel = 0;
-    password = '';
-    error = '';
+  // No-email, local-only sign-in. Boots straight into a 'guest' namespace.
+  function doGuest() {
+    if (done || phase === 'verifying') return;
+    const session = auth.signInGuest();
+    finishLogin(session.user);
   }
 
   // ── input ───────────────────────────────────────────────────────
+  function focusField() { return focus === FIELD_EMAIL ? 'email' : focus === FIELD_NAME ? 'username' : null; }
+
+  function moveFocus(d) {
+    if (phase === 'verifying') return;
+    // On the "sent" screen only the [different email] / guest buttons matter.
+    if (phase === 'sent') { focus = focus === FIELD_GUEST ? FIELD_BTN : FIELD_GUEST; error = ''; return; }
+    focus = (focus + d + FIELD_COUNT) % FIELD_COUNT;
+    error = '';
+  }
+
   function onKey(e) {
     if (done || e.type !== 'down') return;
     const k = e.key;
-    if (k === 'ArrowLeft') { moveSel(-1); e.raw?.preventDefault?.(); return; }
-    if (k === 'ArrowRight' || k === 'Tab') {
-      moveSel(k === 'Tab' && e.shift ? -1 : 1); e.raw?.preventDefault?.(); return;
+    if (k === 'Tab') { moveFocus(e.shift ? -1 : 1); e.raw?.preventDefault?.(); return; }
+    if (k === 'ArrowDown') { moveFocus(1); e.raw?.preventDefault?.(); return; }
+    if (k === 'ArrowUp') { moveFocus(-1); e.raw?.preventDefault?.(); return; }
+    if (k === 'Enter') {
+      e.raw?.preventDefault?.();
+      if (focus === FIELD_GUEST) doGuest(); else submit();
+      return;
     }
-    if (k === 'ArrowUp') { moveSel(-1); e.raw?.preventDefault?.(); return; }
-    if (k === 'ArrowDown') { moveSel(1); e.raw?.preventDefault?.(); return; }
-    if (k === 'Enter') { e.raw?.preventDefault?.(); submit(); return; }
-    if (k === 'Delete') { e.raw?.preventDefault?.(); deleteFlow(); return; }
     if (k === 'Backspace') {
-      if (!isNewTile(sel) && people[sel]?.hasPassword) {
-        password = password.slice(0, -1); error = '';
-      }
+      const f = focusField();
+      if (f === 'email') email = email.slice(0, -1);
+      else if (f === 'username') username = username.slice(0, -1);
+      error = '';
       e.raw?.preventDefault?.();
       return;
     }
-    // Typed password char (printable, no modifiers).
+    // Printable char into the focused field (no modifiers).
     if (k && k.length === 1 && !e.ctrl && !e.meta && !e.alt) {
-      if (!isNewTile(sel) && people[sel]?.hasPassword) {
-        password += k; error = '';
-      }
+      const f = focusField();
+      if (f === 'email') email += k;
+      else if (f === 'username') username += k;
+      error = '';
     }
   }
 
-  function hitTile(x, y) {
+  function hitField(x, y) {
     if (!layout) return -1;
-    for (const r of layout.tiles) {
-      if (x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h) return r.index;
-    }
+    if (y === layout.emailY && x >= layout.x && x < layout.x + layout.fieldW) return FIELD_EMAIL;
+    if (y === layout.nameY && x >= layout.x && x < layout.x + layout.fieldW) return FIELD_NAME;
     return -1;
   }
   function hitButton(x, y) {
     const b = layout?.btn;
     return b && y === b.y && x >= b.x && x < b.x + b.w;
   }
+  function hitGuest(x, y) {
+    const b = layout?.guestBtn;
+    return b && y === b.y && x >= b.x && x < b.x + b.w;
+  }
+
+  function onPointer(x, y) {
+    const fi = hitField(x, y);
+    if (fi >= 0) { focus = fi; error = ''; return; }
+    if (hitGuest(x, y)) { doGuest(); return; }
+    if (hitButton(x, y)) submit();
+  }
 
   function onMouse(e) {
     if (done) return;
-    if (e.type === 'mousedown' || e.type === 'click') {
-      const ti = hitTile(e.x, e.y);
-      if (ti >= 0) {
-        if (ti === sel && e.type === 'click') { submit(); return; }
-        sel = ti; password = ''; error = '';
-        return;
-      }
-      if (hitButton(e.x, e.y)) { submit(); return; }
-    }
-    if (e.type === 'dblclick') {
-      const ti = hitTile(e.x, e.y);
-      if (ti >= 0) { sel = ti; submit(); }
-    }
+    if (e.type === 'mousedown' || e.type === 'click') onPointer(e.x, e.y);
   }
 
   function onTouch(e) {
     if (done) return;
-    if (e.type === 'tap' || e.type === 'doubletap') {
-      const ti = hitTile(e.x, e.y);
-      if (ti >= 0) {
-        if (ti === sel || e.type === 'doubletap') { sel = ti; submit(); }
-        else { sel = ti; password = ''; error = ''; }
-        return;
-      }
-      if (hitButton(e.x, e.y)) submit();
-    }
+    if (e.type === 'tap' || e.type === 'doubletap') onPointer(e.x, e.y);
   }
 
-  // Wire engine handlers; keep the unsubscribers for destroy().
   const offs = [
     engine.onFrame(() => render()),
     engine.onKey(onKey),
@@ -332,5 +308,5 @@ export function createLogin(engine, opts = {}) {
     for (const off of offs) { try { off(); } catch {} }
   }
 
-  return { render, destroy };
+  return { render, destroy, signIn };
 }
