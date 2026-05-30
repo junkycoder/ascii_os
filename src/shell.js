@@ -30,6 +30,38 @@ function getMusicPlayer(id) {
   return p;
 }
 
+// ── System info (memory + storage) for the 'system' widget ──────────
+function fmtBytes(n) {
+  if (!n || n < 0) return '0 B';
+  const u = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let v = n, i = 0;
+  while (v >= 1024 && i < u.length - 1) { v /= 1024; i++; }
+  return (i === 0 || v >= 100 ? Math.round(v) : v.toFixed(1)) + ' ' + u[i];
+}
+const sysInfo = { at: 0, usage: 0, quota: 0, lsBytes: 0 };
+function refreshSysInfo() {
+  try {
+    let b = 0;
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      b += (k.length + (localStorage.getItem(k) || '').length) * 2; // UTF-16
+    }
+    sysInfo.lsBytes = b;
+  } catch {}
+  if (navigator.storage && navigator.storage.estimate) {
+    navigator.storage.estimate()
+      .then((e) => { sysInfo.usage = e.usage || 0; sysInfo.quota = e.quota || 0; })
+      .catch(() => {});
+  }
+}
+function drawBar(ctx, x, y, w, frac, c) {
+  const f = Math.max(0, Math.min(1, frac || 0));
+  const fill = Math.round(w * f);
+  for (let i = 0; i < w; i++) {
+    ctx.put(x + i, y, i < fill ? '█' : '░', { fg: i < fill ? c.accent : c.fgDim, bg: c.bg });
+  }
+}
+
 const STORAGE_KEY = 'acii.shell.v2';
 
 const PATTERNS = {
@@ -39,11 +71,11 @@ const PATTERNS = {
   blank:  null,
 };
 
-// Icon dimensions: a roomy tile (4-row box + up to 2 centered label rows).
+// Icon dimensions: a roomy tile (5-row box + up to 2 centered label rows).
 const ICON_W = 10;
-const ICON_BOX_H = 4;          // bordered box height (top + 2 interior + bottom)
+const ICON_BOX_H = 5;          // bordered box height (top + 3 interior + bottom)
 const ICON_H = ICON_BOX_H + 1; // box + 1 baseline label row (hit-test height)
-const ICON_LAYOUT_V = 2;       // bump when icon size changes → drop stale positions
+const ICON_LAYOUT_V = 3;       // bump when icon size changes → drop stale positions
 
 // Built-in widgets — pinned panels on the desktop. Each renders into a
 // sub-context. Spec: { defaultSize: {w, h}, render(ctx, widget) }.
@@ -171,6 +203,37 @@ const WIDGETS = {
       return false;
     },
   },
+  system: {
+    defaultSize: { w: 30, h: 7 },
+    label: 'system',
+    render(ctx) {
+      const c = ctx.theme.peek().colors;
+      const W = ctx.width, H = ctx.height;
+      if (performance.now() - sysInfo.at > 2000) { sysInfo.at = performance.now(); refreshSysInfo(); }
+      ctx.box(0, 0, W, H, { fg: c.border, glyphSet: 'borderRound' });
+      ctx.text(1, 0, ' system ', { fg: c.accent });
+      const barW = Math.max(4, W - 2);
+      let y = 1;
+      // RAM (JS heap on Chromium; else approximate device memory).
+      const mem = performance.memory;
+      if (mem && mem.jsHeapSizeLimit) {
+        ctx.text(1, y, 'ram', { fg: c.fgDim });
+        ctx.text(5, y, `${fmtBytes(mem.usedJSHeapSize)} / ${fmtBytes(mem.jsHeapSizeLimit)} heap`, { fg: c.fg });
+        if (++y < H - 1) { drawBar(ctx, 1, y, barW, mem.usedJSHeapSize / mem.jsHeapSizeLimit, c); y++; }
+      } else {
+        ctx.text(1, y, `ram  ~${navigator.deviceMemory || '?'} GB device`, { fg: c.fg });
+        y++;
+      }
+      // Storage (origin quota).
+      if (y < H - 1) {
+        ctx.text(1, y, 'disk', { fg: c.fgDim });
+        ctx.text(6, y, sysInfo.quota ? `${fmtBytes(sysInfo.usage)} / ${fmtBytes(sysInfo.quota)}` : 'estimating…', { fg: c.fg });
+        if (++y < H - 1 && sysInfo.quota) { drawBar(ctx, 1, y, barW, sysInfo.usage / sysInfo.quota, c); y++; }
+      }
+      // Virtual FS footprint in localStorage.
+      if (y < H - 1) ctx.text(1, y, `fs   ${fmtBytes(sysInfo.lsBytes)} · localStorage`, { fg: c.fgDim });
+    },
+  },
 };
 
 export function createShell(engine, opts = {}) {
@@ -266,7 +329,7 @@ export function createShell(engine, opts = {}) {
   // Each icon is ICON_W × ICON_H cells; spacing 1 cell.
   function defaultIconPos(appIdx) {
     const isWide = engine.cols.peek() >= 60;
-    const slotH = ICON_BOX_H + 3; // box (4) + up to 2 label rows + 1 gap
+    const slotH = ICON_BOX_H + 2; // box (5) + 2 label rows, tight spacing
     const slotW = ICON_W + 2;
     if (isWide) {
       return { x: 2, y: 1 + appIdx * slotH };
@@ -551,7 +614,7 @@ export function createShell(engine, opts = {}) {
   function defaultFileIconPos(fileIdx) {
     // Files go in a column to the RIGHT of app icons.
     const isWide = engine.cols.peek() >= 60;
-    const slotH = ICON_BOX_H + 3;
+    const slotH = ICON_BOX_H + 2;
     if (isWide) {
       return { x: 2 + (ICON_W + 2) + 4, y: 1 + fileIdx * slotH };
     } else {
