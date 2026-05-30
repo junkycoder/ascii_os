@@ -18,6 +18,11 @@ import { createWindowManager } from './wm.js';
 import { createFS } from './fs.js';
 import { createContextMenu } from './ui-menu.js';
 import { createMusicPlayer } from './music.js';
+import * as nf from './newfish.js';
+
+// Set inside createShell so the module-level 'timetrack' widget can open the
+// Time app on click (widget render/onClick live at module scope, like music).
+let _shellOpenApp = null;
 
 // Shared FS singleton — used by Paint, Finder, and Shell (desktop icons).
 const fs = globalThis.__aciiFS ||= createFS({ storageKey: 'acii.fs.v1' });
@@ -199,6 +204,61 @@ const WIDGETS = {
         if (lx >= m.prevX && lx < m.prevX + m.prevW) { p.prev(); return true; }
         if (lx >= m.playX && lx < m.playX + m.playW) { p.toggle(); return true; }
         if (lx >= m.nextX && lx < m.nextX + m.nextW) { p.next(); return true; }
+      }
+      return false;
+    },
+  },
+  timetrack: {
+    defaultSize: { w: 26, h: 6 },
+    label: 'time track',
+    render(ctx, w) {
+      const c = ctx.theme.peek().colors;
+      const W = ctx.width, H = ctx.height;
+      nf.maybeRefresh(); // throttled auto-sync (no-op without credentials)
+      ctx.box(0, 0, W, H, { fg: c.accent, glyphSet: 'borderRound' });
+      ctx.text(1, 0, ' time ', { fg: c.accent });
+
+      const acc = nf.account.peek();
+      if (!acc.hasToken) {
+        ctx.text(1, 1, 'not connected'.slice(0, W - 2), { fg: c.warning });
+        if (H >= 4) ctx.text(1, 2, 'add token in Time app'.slice(0, W - 2), { fg: c.fgDim });
+        const b = '[ Set up ]';
+        const by = H - 2;
+        ctx.text(1, by, b, { fg: c.fg });
+        w._ttBtn = { x: 1, y: by, w: b.length, action: 'open' };
+        return;
+      }
+
+      const today = nf.fmtMinutes(nf.todayMinutes());
+      const month = nf.fmtMinutes(nf.monthMinutes());
+      ctx.text(1, 1, ('Today  ' + today).slice(0, W - 2), { fg: c.accent, bold: true });
+      if (H >= 4) ctx.text(1, 2, ('Month  ' + month).slice(0, W - 2), { fg: c.fg });
+
+      // Last entry of today (or sync/error hint) on the next row.
+      if (H >= 5) {
+        const err = nf.store.error.peek();
+        const ents = nf.store.entries.peek()
+          .filter(e => nf.isSameDay(e.startedAt))
+          .sort((a, b) => (b.startedAt?.getTime?.() || 0) - (a.startedAt?.getTime?.() || 0));
+        const last = ents[0];
+        const line = err && err !== 'no-credentials' ? '! ' + err
+          : last ? (last.description || '(no description)')
+          : nf.store.loading.peek() ? 'syncing…'
+          : 'no entries today';
+        ctx.text(1, 3, line.slice(0, W - 2), { fg: err && err !== 'no-credentials' ? c.error : c.fgDim });
+      }
+
+      const b = '[ + log ]';
+      const by = H - 2;
+      ctx.text(1, by, b, { fg: c.success, bold: true });
+      w._ttBtn = { x: 1, y: by, w: b.length, action: 'log' };
+    },
+    onClick(lx, ly, w) {
+      const b = w._ttBtn;
+      if (b && ly === b.y && lx >= b.x && lx < b.x + b.w) {
+        if (b.action === 'log') globalThis.__aciiTimetrackQuickLog = true;
+        if (_shellOpenApp) _shellOpenApp('timetrack');
+        return true;
       }
       return false;
     },
@@ -424,6 +484,9 @@ export function createShell(engine, opts = {}) {
     bumpSave();
     return win;
   }
+
+  // Expose openApp to the module-level 'timetrack' widget's onClick.
+  _shellOpenApp = openApp;
 
   function closeWindow(win) { win.close(); }
 
