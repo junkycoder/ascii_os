@@ -39,9 +39,11 @@ const PATTERNS = {
   blank:  null,
 };
 
-// Icon dimensions: 4-row tile (3-row box + 1-row label).
-const ICON_W = 6;
-const ICON_H = 4;
+// Icon dimensions: a roomy tile (4-row box + up to 2 centered label rows).
+const ICON_W = 10;
+const ICON_BOX_H = 4;          // bordered box height (top + 2 interior + bottom)
+const ICON_H = ICON_BOX_H + 1; // box + 1 baseline label row (hit-test height)
+const ICON_LAYOUT_V = 2;       // bump when icon size changes → drop stale positions
 
 // Built-in widgets — pinned panels on the desktop. Each renders into a
 // sub-context. Spec: { defaultSize: {w, h}, render(ctx, widget) }.
@@ -212,6 +214,7 @@ export function createShell(engine, opts = {}) {
   function save() {
     if (!persist) return;
     const state = {
+      iconLayoutV: ICON_LAYOUT_V,
       theme: engine.theme.peek().name,
       background: backgroundKind.peek(),
       taskbarPosition: taskbarPos.peek(),
@@ -235,8 +238,12 @@ export function createShell(engine, opts = {}) {
     }
     if (saved.background) backgroundKind.value = saved.background;
     if (saved.taskbarPosition) taskbarPos.value = saved.taskbarPosition;
-    if (saved.icons) for (const [k, v] of Object.entries(saved.icons)) iconPositions.set(k, v);
-    if (saved.fileIcons) for (const [k, v] of Object.entries(saved.fileIcons)) fileIconPos.set(k, v);
+    // Only restore saved icon positions if they were laid out for the current
+    // icon size; otherwise drop them so they re-default with the new spacing.
+    if (saved.iconLayoutV === ICON_LAYOUT_V) {
+      if (saved.icons) for (const [k, v] of Object.entries(saved.icons)) iconPositions.set(k, v);
+      if (saved.fileIcons) for (const [k, v] of Object.entries(saved.fileIcons)) fileIconPos.set(k, v);
+    }
     if (saved.wallpaperPath) wallpaperPath.value = saved.wallpaperPath;
     if (saved.widgets?.length) {
       widgets.value = saved.widgets.map(w => ({ ...w, id: w.id || `wd-${_widgetSeq++}` }));
@@ -259,7 +266,7 @@ export function createShell(engine, opts = {}) {
   // Each icon is ICON_W × ICON_H cells; spacing 1 cell.
   function defaultIconPos(appIdx) {
     const isWide = engine.cols.peek() >= 60;
-    const slotH = ICON_H + 1; // box (3) + 1 label row; 2nd wrapped label row uses the gap
+    const slotH = ICON_BOX_H + 3; // box (4) + up to 2 label rows + 1 gap
     const slotW = ICON_W + 2;
     if (isWide) {
       return { x: 2, y: 1 + appIdx * slotH };
@@ -447,9 +454,9 @@ export function createShell(engine, opts = {}) {
     return raw[0];
   }
 
-  // Icon labels may overhang the 6-wide box and wrap to a second row, so
-  // two-word names ("GameMaker", "Media House") stay readable.
-  const LABEL_W = 8;
+  // Icon labels center under the tile and may wrap to a second row, so
+  // two-word names ("Game Maker", "Media House") stay readable.
+  const LABEL_W = ICON_W;
   function splitLabel(raw) {
     const s = String(raw == null ? '' : raw);
     if (s.length <= LABEL_W) return [s];
@@ -476,6 +483,25 @@ export function createShell(engine, opts = {}) {
     }
   }
 
+  // A rounded tile: ICON_W wide × ICON_BOX_H tall, glyph centered on a faint
+  // face. Shared by app and file icons for a consistent, bigger look.
+  function drawIconTile(x, y, glyph, borderFg, glyphFg, faceBg) {
+    const g = engine.theme.peek().glyphs.borderRound;
+    const inner = ICON_W - 2;
+    engine.text(x, y, g.tl + g.h.repeat(inner) + g.tr, { fg: borderFg });
+    for (let r = 1; r < ICON_BOX_H - 1; r++) {
+      engine.put(x, y + r, g.v, { fg: borderFg });
+      engine.text(x + 1, y + r, ' '.repeat(inner), { fg: borderFg, bg: faceBg });
+      engine.put(x + ICON_W - 1, y + r, g.v, { fg: borderFg });
+    }
+    engine.text(x, y + ICON_BOX_H - 1, g.bl + g.h.repeat(inner) + g.br, { fg: borderFg });
+    // Glyph (1–2 chars) centered in the interior.
+    const gstr = String(glyph).slice(0, 2);
+    const gx = x + Math.floor((ICON_W - gstr.length) / 2);
+    const gy = y + Math.floor(ICON_BOX_H / 2);
+    engine.text(gx, gy, gstr, { fg: glyphFg, bg: faceBg, bold: true });
+  }
+
   function renderIcons() {
     if (engine.mode.peek() === 'watch') return; // no icons on watch
     if (running.size > 0 && engine.mode.peek() === 'mobile') return;
@@ -489,20 +515,11 @@ export function createShell(engine, opts = {}) {
       const isDragging = deskDrag?.kind === 'icon' && deskDrag.target === app.id;
       const fg = isDragging ? c.borderFocus : c.accent;
       const labelFg = isDragging ? c.borderFocus : c.fg;
-
-      // Top border
-      engine.text(x, y, g.tl + g.h.repeat(ICON_W - 2) + g.tr, { fg });
-      // Middle row with glyph centered
-      const glyph = glyphFromIcon(app.icon);
-      engine.put(x, y + 1, g.v, { fg });
-      engine.text(x + 1, y + 1, ' '.repeat(ICON_W - 2), { fg });
-      const gx = x + Math.floor(ICON_W / 2) - 1;
-      engine.put(gx, y + 1, glyph, { fg: c.accent, bold: true });
-      engine.put(x + ICON_W - 1, y + 1, g.v, { fg });
-      // Bottom border
-      engine.text(x, y + 2, g.bl + g.h.repeat(ICON_W - 2) + g.br, { fg });
-      // Label centered under box (wraps to 2 rows for long / two-word names)
-      drawIconLabel(x, y + 3, app.label || app.id, labelFg);
+      const face = isDragging ? (c.accentDim || c.border) : c.border;
+      // Bigger rounded tile with a faint face + centered glyph.
+      drawIconTile(x, y, glyphFromIcon(app.icon), fg, c.accent, face);
+      // Centered label under the tile (wraps for long / two-word names).
+      drawIconLabel(x, y + ICON_BOX_H, app.label || app.id, labelFg);
     });
   }
 
@@ -534,7 +551,7 @@ export function createShell(engine, opts = {}) {
   function defaultFileIconPos(fileIdx) {
     // Files go in a column to the RIGHT of app icons.
     const isWide = engine.cols.peek() >= 60;
-    const slotH = ICON_H + 1;
+    const slotH = ICON_BOX_H + 3;
     if (isWide) {
       return { x: 2 + (ICON_W + 2) + 4, y: 1 + fileIdx * slotH };
     } else {
@@ -567,17 +584,11 @@ export function createShell(engine, opts = {}) {
       const fg = isDragging ? c.borderFocus
               : isWallpaper ? c.warning
               : c.accentDim;
-      // Box
-      engine.text(x, y, g.tl + g.h.repeat(ICON_W - 2) + g.tr, { fg });
-      engine.put(x, y + 1, g.v, { fg });
-      engine.text(x + 1, y + 1, ' '.repeat(ICON_W - 2), { fg });
-      const glyph = extGlyph(f.name);
-      const gx = x + Math.floor(ICON_W / 2) - 1;
-      engine.text(gx, y + 1, glyph.slice(0, 2), { fg: isWallpaper ? c.warning : c.fg, bold: true });
-      engine.put(x + ICON_W - 1, y + 1, g.v, { fg });
-      engine.text(x, y + 2, g.bl + g.h.repeat(ICON_W - 2) + g.br, { fg });
-      // Label — filename wraps to 2 rows so two-part names stay readable
-      drawIconLabel(x, y + 3, f.name, c.fg);
+      const glyphFg = isWallpaper ? c.warning : c.fg;
+      // File tiles are outline-only (no face fill) to read lighter than apps.
+      drawIconTile(x, y, extGlyph(f.name), fg, glyphFg, c.bg);
+      // Filename centered under the tile (wraps for two-part names).
+      drawIconLabel(x, y + ICON_BOX_H, f.name, c.fg);
     });
   }
 
