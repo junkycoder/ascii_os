@@ -1,0 +1,26 @@
+name: Deploy to Cloudflare
+
+# Auto-deploy the Worker (static ASCII shell + assets) on every push to trunk.
+# Manual runs available via the Actions tab too.
+on:
+  push:
+    branches: [trunk]
+  workflow_dispatch:
+
+# One deploy at a time; a newer push cancels an in-flight one.
+concurrency:
+  group: deploy-trunk
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Deploy with Wrangler
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          # account_id lives in wrangler.jsonc; no build step (zero-deps shell).
+          command: deploy
