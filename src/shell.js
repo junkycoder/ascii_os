@@ -196,7 +196,7 @@ export function createShell(engine, opts = {}) {
   // Each icon is ICON_W × ICON_H cells; spacing 1 cell.
   function defaultIconPos(appIdx) {
     const isWide = engine.cols.peek() >= 60;
-    const slotH = ICON_H + 1; // 1 row gap between icons
+    const slotH = ICON_H + 2; // room for a 2-row wrapped label + gap
     const slotW = ICON_W + 2;
     if (isWide) {
       return { x: 2, y: 1 + appIdx * slotH };
@@ -384,6 +384,35 @@ export function createShell(engine, opts = {}) {
     return raw[0];
   }
 
+  // Icon labels may overhang the 6-wide box and wrap to a second row, so
+  // two-word names ("GameMaker", "Media House") stay readable.
+  const LABEL_W = 8;
+  function splitLabel(raw) {
+    const s = String(raw == null ? '' : raw);
+    if (s.length <= LABEL_W) return [s];
+    // Prefer a break near the middle, at a separator or a camelCase boundary.
+    const mid = Math.ceil(s.length / 2);
+    let best = -1, bestDist = Infinity;
+    for (let i = 1; i < s.length; i++) {
+      const sep = /[\s_\-.]/.test(s[i - 1]) || /[\s_\-.]/.test(s[i]);
+      const camel = /[a-z0-9]/.test(s[i - 1]) && /[A-Z]/.test(s[i]);
+      if (sep || camel) { const d = Math.abs(i - mid); if (d < bestDist) { bestDist = d; best = i; } }
+    }
+    if (best === -1) best = mid;
+    const clip = (t) => t.length > LABEL_W ? t.slice(0, LABEL_W - 1) + '…' : t;
+    const a = clip(s.slice(0, best).replace(/[\s_\-.]+$/, ''));
+    const b = clip(s.slice(best).replace(/^[\s_\-.]+/, ''));
+    return b ? [a, b] : [a];
+  }
+  function drawIconLabel(boxX, labelY, raw, fg) {
+    const lines = splitLabel(raw);
+    for (let i = 0; i < lines.length && i < 2; i++) {
+      const lbl = lines[i];
+      const lx = Math.max(0, boxX + Math.floor((ICON_W - lbl.length) / 2));
+      engine.text(lx, labelY + i, lbl, { fg });
+    }
+  }
+
   function renderIcons() {
     if (engine.mode.peek() === 'watch') return; // no icons on watch
     if (running.size > 0 && engine.mode.peek() === 'mobile') return;
@@ -409,14 +438,8 @@ export function createShell(engine, opts = {}) {
       engine.put(x + ICON_W - 1, y + 1, g.v, { fg });
       // Bottom border
       engine.text(x, y + 2, g.bl + g.h.repeat(ICON_W - 2) + g.br, { fg });
-      // Label centered under box
-      const rawLabel = (app.label || app.id);
-      const labelMaxW = ICON_W;
-      const label = rawLabel.length > labelMaxW
-        ? rawLabel.slice(0, labelMaxW - 1) + '…'
-        : rawLabel;
-      const lx = x + Math.floor((ICON_W - label.length) / 2);
-      engine.text(lx, y + 3, label, { fg: labelFg });
+      // Label centered under box (wraps to 2 rows for long / two-word names)
+      drawIconLabel(x, y + 3, app.label || app.id, labelFg);
     });
   }
 
@@ -448,7 +471,7 @@ export function createShell(engine, opts = {}) {
   function defaultFileIconPos(fileIdx) {
     // Files go in a column to the RIGHT of app icons.
     const isWide = engine.cols.peek() >= 60;
-    const slotH = ICON_H + 1;
+    const slotH = ICON_H + 2;
     if (isWide) {
       return { x: 2 + (ICON_W + 2) + 4, y: 1 + fileIdx * slotH };
     } else {
@@ -490,11 +513,8 @@ export function createShell(engine, opts = {}) {
       engine.text(gx, y + 1, glyph.slice(0, 2), { fg: isWallpaper ? c.warning : c.fg, bold: true });
       engine.put(x + ICON_W - 1, y + 1, g.v, { fg });
       engine.text(x, y + 2, g.bl + g.h.repeat(ICON_W - 2) + g.br, { fg });
-      // Label — short filename without ext if possible
-      let label = f.name;
-      if (label.length > ICON_W) label = label.slice(0, ICON_W - 1) + '…';
-      const lx = x + Math.floor((ICON_W - label.length) / 2);
-      engine.text(lx, y + 3, label, { fg: c.fg });
+      // Label — filename wraps to 2 rows so two-part names stay readable
+      drawIconLabel(x, y + 3, f.name, c.fg);
     });
   }
 
