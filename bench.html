@@ -1,0 +1,326 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>acii_os · bench</title>
+<style>
+  html, body {
+    margin: 0; padding: 0; background: #0b0d10; color: #d7dde3;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 13px;
+  }
+  .wrap {
+    display: grid;
+    grid-template-columns: 1fr 280px;
+    gap: 16px;
+    padding: 16px;
+    min-height: 100vh;
+    box-sizing: border-box;
+  }
+  #app {
+    /* engine mounts here; its own DOM provides background/colors */
+    background: #000;
+    align-self: start;
+    overflow: hidden;
+  }
+  .panel {
+    display: flex; flex-direction: column; gap: 12px;
+    position: sticky; top: 16px; align-self: start;
+  }
+  .panel h1 { font-size: 13px; margin: 0; letter-spacing: 0.08em; text-transform: uppercase; color: #8a93a0; }
+  .panel .group {
+    border: 1px solid #1d2128; border-radius: 6px; padding: 10px;
+    background: #11141a;
+  }
+  .panel button {
+    display: block; width: 100%; text-align: left;
+    font: inherit; color: inherit;
+    background: #181c23; border: 1px solid #232932; border-radius: 4px;
+    padding: 6px 8px; margin-bottom: 4px; cursor: pointer;
+  }
+  .panel button:hover { background: #1f242d; }
+  .panel button.active { background: #2a3344; border-color: #3b4a66; color: #fff; }
+  .panel button:last-child { margin-bottom: 0; }
+  .metric {
+    display: flex; justify-content: space-between; align-items: baseline;
+    padding: 4px 0;
+    border-bottom: 1px dashed #1d2128;
+  }
+  .metric:last-child { border-bottom: none; }
+  .metric .k { color: #8a93a0; font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; }
+  .metric .v { color: #d7dde3; font-variant-numeric: tabular-nums; }
+  .metric .v.big { color: #7cc4ff; font-size: 18px; font-weight: 600; }
+  .note { color: #5a6470; font-size: 11px; line-height: 1.4; }
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <div id="app"></div>
+    <div class="panel">
+      <h1>acii_os bench</h1>
+      <div class="group">
+        <div class="metric"><span class="k">FPS</span><span class="v big" id="m-fps">—</span></div>
+        <div class="metric"><span class="k">Mean frame</span><span class="v" id="m-mean">— ms</span></div>
+        <div class="metric"><span class="k">p95 frame</span><span class="v" id="m-p95">— ms</span></div>
+        <div class="metric"><span class="k">Cells / sec</span><span class="v" id="m-cps">—</span></div>
+        <div class="metric"><span class="k">Grid</span><span class="v" id="m-grid">—</span></div>
+        <div class="metric"><span class="k">Dirty / frame</span><span class="v" id="m-dirty">—</span></div>
+      </div>
+      <div class="group" id="scenes"></div>
+      <div class="note">
+        Frame time measured around onFrame + engine.flush().
+        Ring buffer of 60 samples. Overlay updates every 250 ms.
+      </div>
+    </div>
+  </div>
+
+<script type="module">
+  import { createEngine, themes } from './src/engine.js';
+
+  // ── Scene registry ────────────────────────────────────────────────
+  // Each scene declares its grid size and an init(engine) -> step(t)
+  // function. step() is called once per frame inside onFrame.
+  const SCENES = [
+    {
+      id: 'static',
+      label: '1 · Static 80×40 (paint once)',
+      cols: 80, rows: 40,
+      init(engine) {
+        const t = engine.theme.peek();
+        engine.clear();
+        engine.box(0, 0, 80, 40, { fg: t.colors.border });
+        engine.text(2, 1, 'STATIC SCENE — painted once', { fg: t.colors.accent, bold: true });
+        for (let y = 3; y < 38; y++) {
+          for (let x = 2; x < 78; x++) {
+            // mild deterministic content so there is something to look at
+            const ch = '·:-=+*#%@'[(x * 7 + y * 13) % 9];
+            engine.put(x, y, ch, { fg: t.colors.fgDim });
+          }
+        }
+        // No-op step — nothing changes after the first frame.
+        return () => {};
+      },
+    },
+    {
+      id: 'full-repaint',
+      label: '2 · Full repaint 80×40',
+      cols: 80, rows: 40,
+      init(engine) {
+        const t = engine.theme.peek();
+        const palette = [t.colors.fg, t.colors.accent, t.colors.success, t.colors.warning, t.colors.error];
+        return (time) => {
+          const w = 80, h = 40;
+          for (let y = 0; y < h; y++) {
+            for (let x = 0; x < w; x++) {
+              const n = (x * 131 + y * 17 + (time | 0)) >>> 0;
+              const ch = '.+*#@%~-'[n & 7];
+              const fg = palette[(n >>> 3) % palette.length];
+              engine.put(x, y, ch, { fg });
+            }
+          }
+        };
+      },
+    },
+    {
+      id: 'half-dirty',
+      label: '3 · 50% dirty 80×40',
+      cols: 80, rows: 40,
+      init(engine) {
+        const t = engine.theme.peek();
+        engine.clear();
+        // Paint a stable background first
+        for (let y = 0; y < 40; y++)
+          for (let x = 0; x < 80; x++)
+            engine.put(x, y, '.', { fg: t.colors.fgDim });
+        engine.flush(); // commit baseline so dirty tracking is honest
+        return () => {
+          // Randomly flip half the cells each frame
+          for (let i = 0; i < 80 * 40 / 2; i++) {
+            const x = (Math.random() * 80) | 0;
+            const y = (Math.random() * 40) | 0;
+            engine.put(x, y, '#@*+-=:'[(Math.random() * 7) | 0], { fg: t.colors.accent });
+          }
+        };
+      },
+    },
+    {
+      id: 'big',
+      label: '4 · Big 120×60, 50% dirty',
+      cols: 120, rows: 60,
+      init(engine) {
+        const t = engine.theme.peek();
+        engine.clear();
+        engine.flush();
+        return () => {
+          const w = 120, h = 60;
+          const n = (w * h) / 2;
+          for (let i = 0; i < n; i++) {
+            const x = (Math.random() * w) | 0;
+            const y = (Math.random() * h) | 0;
+            engine.put(x, y, '.+*#%@'[(Math.random() * 6) | 0], { fg: t.colors.fg });
+          }
+        };
+      },
+    },
+    {
+      id: 'huge',
+      label: '5 · Huge 160×60, 30% dirty',
+      cols: 160, rows: 60,
+      init(engine) {
+        const t = engine.theme.peek();
+        engine.clear();
+        engine.flush();
+        return () => {
+          const w = 160, h = 60;
+          const n = ((w * h) * 0.3) | 0;
+          for (let i = 0; i < n; i++) {
+            const x = (Math.random() * w) | 0;
+            const y = (Math.random() * h) | 0;
+            engine.put(x, y, '.+*#%@~'[(Math.random() * 7) | 0], { fg: t.colors.fgDim });
+          }
+        };
+      },
+    },
+    {
+      id: 'plasma',
+      label: '6 · Plasma 80×40 (color cycle)',
+      cols: 80, rows: 40,
+      init(engine) {
+        const t = engine.theme.peek();
+        const ramp = ' .:-=+*#%@';
+        return (time) => {
+          const w = 80, h = 40;
+          const ts = time / 800;
+          for (let y = 0; y < h; y++) {
+            for (let x = 0; x < w; x++) {
+              const v =
+                Math.sin(x / 8 + ts) +
+                Math.sin(y / 6 - ts) +
+                Math.sin((x + y) / 10 + ts * 1.3);
+              // map [-3, 3] -> [0, 1]
+              const u = (v + 3) / 6;
+              const idx = Math.min(ramp.length - 1, (u * ramp.length) | 0);
+              // color cycles through accent palette
+              const hue = ((u * 360 + time / 20) | 0) % 360;
+              engine.put(x, y, ramp[idx], { fg: `hsl(${hue} 70% 60%)` });
+            }
+          }
+        };
+      },
+    },
+  ];
+
+  // Estimated dirty cells per frame, used for cells/sec.
+  function dirtyEstimateFor(scene) {
+    switch (scene.id) {
+      case 'static':       return 0;
+      case 'full-repaint': return 80 * 40;
+      case 'half-dirty':   return (80 * 40) / 2;
+      case 'big':          return (120 * 60) / 2;
+      case 'huge':         return ((160 * 60) * 0.3) | 0;
+      case 'plasma':       return 80 * 40; // every cell touched
+      default:             return 0;
+    }
+  }
+
+  // ── Engine bootstrap ──────────────────────────────────────────────
+  const engine = createEngine({
+    target: '#app',
+    cols: 80, rows: 40,
+    theme: themes['default-dark'],
+    fps: 60, // uncap-ish; engine still gates by RAF
+  });
+
+  // ── Frame-time sampling ───────────────────────────────────────────
+  const RING = 60;
+  const samples = new Float64Array(RING);
+  let ringIdx = 0;
+  let ringCount = 0;
+  let lastFrameEnd = 0;
+
+  // We measure wall time between the start of one onFrame callback and
+  // the start of the next. Since the engine calls flush() between our
+  // handler returning and the next tick, the delta captures draw+flush.
+  engine.onFrame((dt, t) => {
+    const now = performance.now();
+    if (lastFrameEnd !== 0) {
+      const ft = now - lastFrameEnd;
+      samples[ringIdx] = ft;
+      ringIdx = (ringIdx + 1) % RING;
+      if (ringCount < RING) ringCount++;
+    }
+    lastFrameEnd = now;
+    if (currentStep) currentStep(t);
+  });
+
+  // ── Scene switching ───────────────────────────────────────────────
+  let currentStep = () => {};
+  let currentScene = null;
+
+  function loadScene(scene) {
+    currentScene = scene;
+    // Reset perf samples so the previous scene doesn't pollute stats.
+    ringIdx = 0; ringCount = 0; lastFrameEnd = 0;
+    samples.fill(0);
+    // Resize (also clears buffers and rebuilds DOM)
+    engine.resize(scene.cols, scene.rows);
+    currentStep = scene.init(engine);
+    // Refresh button highlight
+    for (const btn of sceneBtns) {
+      btn.classList.toggle('active', btn.dataset.id === scene.id);
+    }
+    document.getElementById('m-grid').textContent = `${scene.cols} × ${scene.rows}`;
+    document.getElementById('m-dirty').textContent = dirtyEstimateFor(scene).toLocaleString();
+  }
+
+  // Build scene buttons
+  const sceneBtns = [];
+  const sceneHost = document.getElementById('scenes');
+  for (const s of SCENES) {
+    const b = document.createElement('button');
+    b.textContent = s.label;
+    b.dataset.id = s.id;
+    b.addEventListener('click', () => loadScene(s));
+    sceneHost.appendChild(b);
+    sceneBtns.push(b);
+  }
+
+  // ── Overlay updater (every 250ms, not every frame) ────────────────
+  const elFps   = document.getElementById('m-fps');
+  const elMean  = document.getElementById('m-mean');
+  const elP95   = document.getElementById('m-p95');
+  const elCps   = document.getElementById('m-cps');
+
+  function computeStats() {
+    if (ringCount === 0) return { mean: 0, p95: 0 };
+    const arr = Array.from(samples.subarray(0, ringCount)).sort((a, b) => a - b);
+    let sum = 0;
+    for (let i = 0; i < arr.length; i++) sum += arr[i];
+    const mean = sum / arr.length;
+    const p95Idx = Math.min(arr.length - 1, Math.floor(arr.length * 0.95));
+    return { mean, p95: arr[p95Idx] };
+  }
+
+  setInterval(() => {
+    const { mean, p95 } = computeStats();
+    const fps = engine.fps.peek();
+    elFps.textContent = fps || '—';
+    elMean.textContent = mean ? mean.toFixed(2) + ' ms' : '— ms';
+    elP95.textContent  = p95  ? p95.toFixed(2)  + ' ms' : '— ms';
+    if (currentScene) {
+      const dirty = dirtyEstimateFor(currentScene);
+      const cps = fps * dirty;
+      elCps.textContent = cps ? cps.toLocaleString() : '0';
+    }
+  }, 250);
+
+  // ── Go ────────────────────────────────────────────────────────────
+  loadScene(SCENES[0]);
+  engine.start();
+
+  // expose for poking from devtools
+  window.__bench = { engine, SCENES, loadScene };
+</script>
+</body>
+</html>
