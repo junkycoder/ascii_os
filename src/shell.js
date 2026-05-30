@@ -259,7 +259,7 @@ export function createShell(engine, opts = {}) {
   // Each icon is ICON_W × ICON_H cells; spacing 1 cell.
   function defaultIconPos(appIdx) {
     const isWide = engine.cols.peek() >= 60;
-    const slotH = ICON_H + 2; // room for a 2-row wrapped label + gap
+    const slotH = ICON_H + 1; // box (3) + 1 label row; 2nd wrapped label row uses the gap
     const slotW = ICON_W + 2;
     if (isWide) {
       return { x: 2, y: 1 + appIdx * slotH };
@@ -534,7 +534,7 @@ export function createShell(engine, opts = {}) {
   function defaultFileIconPos(fileIdx) {
     // Files go in a column to the RIGHT of app icons.
     const isWide = engine.cols.peek() >= 60;
-    const slotH = ICON_H + 2;
+    const slotH = ICON_H + 1;
     if (isWide) {
       return { x: 2 + (ICON_W + 2) + 4, y: 1 + fileIdx * slotH };
     } else {
