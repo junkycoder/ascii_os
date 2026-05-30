@@ -1137,8 +1137,16 @@ export function createShell(engine, opts = {}) {
           iconPositions.set(deskDrag.target, { x, y });
           if (nx !== deskDrag.baseX || ny !== deskDrag.baseY) deskDrag.moved = true;
         } else if (deskDrag.kind === 'file') {
-          const { x, y } = clampPos(nx, ny, ICON_W, ICON_H);
-          fileIconPos.set(deskDrag.target, { x, y });
+          if (deskDrag.group) {
+            const dx = e.x - deskDrag.ox, dy = e.y - deskDrag.oy;
+            for (const g of deskDrag.group) {
+              const { x, y } = clampPos(g.baseX + dx, g.baseY + dy, ICON_W, ICON_H);
+              fileIconPos.set(g.name, { x, y });
+            }
+          } else {
+            const { x, y } = clampPos(nx, ny, ICON_W, ICON_H);
+            fileIconPos.set(deskDrag.target, { x, y });
+          }
           if (nx !== deskDrag.baseX || ny !== deskDrag.baseY) deskDrag.moved = true;
         } else if (deskDrag.kind === 'widget') {
           const w = widgets.peek().find(x => x.id === deskDrag.target);
@@ -1201,7 +1209,18 @@ export function createShell(engine, opts = {}) {
           if (!selectedFiles.has(path)) selectSingleFile(path);
           else selectedFile.value = path;
           const pos = fileIcon(file.name);
-          deskDrag = { kind: 'file', target: file.name, ox: e.x, oy: e.y, baseX: pos.x, baseY: pos.y, moved: false };
+          // Dragging a file that's part of a multi-selection moves the whole
+          // group; snapshot each member's base position up front.
+          let group = null;
+          if (selectedFiles.size > 1 && selectedFiles.has(path)) {
+            group = [];
+            for (const sp of selectedFiles) {
+              const nm = sp.slice('/desktop/'.length);
+              const gp = fileIcon(nm);
+              group.push({ name: nm, baseX: gp.x, baseY: gp.y });
+            }
+          }
+          deskDrag = { kind: 'file', target: file.name, ox: e.x, oy: e.y, baseX: pos.x, baseY: pos.y, moved: false, group };
           return;
         }
         const app = iconHitTest(e.x, e.y);
