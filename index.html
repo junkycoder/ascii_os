@@ -13,7 +13,19 @@
     overscroll-behavior: none; touch-action: none;
     font-family: system-ui, sans-serif;
   }
-  #app { width: 100vw; height: 100vh; display: grid; place-items: stretch; }
+  #app {
+    width: 100vw; height: 100vh; display: grid; place-items: stretch;
+    box-sizing: border-box;
+    /* Keep the grid out of the notch / status bar / home-indicator area.
+       On desktop / dev server env(safe-area-inset-*) resolves to 0, so this
+       is a no-op there; on iOS (viewport-fit=cover) it insets the whole grid
+       so window title bars + buttons land in the tappable region. */
+    padding:
+      env(safe-area-inset-top)
+      env(safe-area-inset-right)
+      env(safe-area-inset-bottom)
+      env(safe-area-inset-left);
+  }
 
   .acii-root {
     background: var(--acii-bg, #000);
@@ -93,12 +105,26 @@
     ]);
 
     // ── Auto-size grid to viewport ──
+    // Measure the #app *content* box (viewport minus safe-area padding) so the
+    // grid never extends under the notch / home indicator. getComputedStyle
+    // resolves env(safe-area-inset-*) to real px on iOS, and to 0 elsewhere.
+    const appEl = document.getElementById('app');
+    function availableSize() {
+      const cs = getComputedStyle(appEl);
+      const padX = parseFloat(cs.paddingLeft) + parseFloat(cs.paddingRight);
+      const padY = parseFloat(cs.paddingTop) + parseFloat(cs.paddingBottom);
+      return {
+        w: Math.max(0, window.innerWidth - padX),
+        h: Math.max(0, window.innerHeight - padY),
+      };
+    }
     function computeGrid() {
-      const fontSize = window.innerWidth < 500 ? 14 : 16;
+      const { w, h } = availableSize();
+      const fontSize = w < 500 ? 14 : 16;
       const aspect = 0.6;
       const cellW = fontSize * aspect;
-      const cols = Math.max(20, Math.floor(window.innerWidth / cellW));
-      const rows = Math.max(8, Math.floor(window.innerHeight / fontSize));
+      const cols = Math.max(20, Math.floor(w / cellW));
+      const rows = Math.max(8, Math.floor(h / fontSize));
       return { cols, rows, fontSize };
     }
 
@@ -136,14 +162,19 @@
 
     // ── Responsive resize ──
     let resizeT = null;
+    function reflow() {
+      const g = computeGrid();
+      engine.theme.value = { ...engine.theme.peek(), font: { ...engine.theme.peek().font, size: g.fontSize } };
+      engine.resize(g.cols, g.rows);
+    }
     window.addEventListener('resize', () => {
       if (resizeT) clearTimeout(resizeT);
-      resizeT = setTimeout(() => {
-        const g = computeGrid();
-        engine.theme.value = { ...engine.theme.peek(), font: { ...engine.theme.peek().font, size: g.fontSize } };
-        engine.resize(g.cols, g.rows);
-      }, 100);
+      resizeT = setTimeout(reflow, 100);
     });
+    // iOS: safe-area insets aren't reliably resolved on the very first frame,
+    // and 'resize' may not fire on initial layout — recompute once they settle.
+    window.addEventListener('orientationchange', () => setTimeout(reflow, 150));
+    setTimeout(reflow, 300);
 
     // ── Hide boot screen once loop ticks ──
     setTimeout(() => {

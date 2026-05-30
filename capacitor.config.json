@@ -4,7 +4,8 @@
   "webDir": "www",
   "backgroundColor": "#000000",
   "ios": {
-    "contentInset": "always",
+    "contentInset": "never",
+    "scrollEnabled": false,
     "backgroundColor": "#000000"
   },
   "plugins": {
