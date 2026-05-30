@@ -6,15 +6,18 @@
 // valid zero-dependency ES module that also runs fine on the dev server and in
 // any browser — where it simply does nothing.
 //
-// Contract: index.html calls `initMobile(engine, shell)` once after the shell
-// is created. In a normal browser this returns immediately (no Capacitor).
+// Contract: index.html calls `initMobile(engine)` once, right after the engine
+// starts — BEFORE login, so the native splash lifts as soon as any UI (login or
+// shell) is on screen. The shell doesn't exist yet at call time, so the back
+// handler resolves it lazily from `window.shell`. In a normal browser this
+// returns immediately (no Capacitor).
 
 export function isNative() {
   const Cap = globalThis.Capacitor;
   return !!(Cap && typeof Cap.isNativePlatform === 'function' && Cap.isNativePlatform());
 }
 
-export function initMobile(engine, shell) {
+export function initMobile(engine, shell = null) {
   // ── Browser / dev server: no Capacitor → no-op, app runs exactly as before.
   if (!isNative()) return;
 
@@ -64,7 +67,8 @@ export function initMobile(engine, shell) {
     if (P.App && P.App.addListener) {
       P.App.addListener('backButton', () => {
         try {
-          const wm = shell && shell.wm;
+          const sh = shell || globalThis.shell;
+          const wm = sh && sh.wm;
           const focused = wm && wm.focused && wm.focused();
           if (focused && wm.close) wm.close(focused.id);
         } catch (_) {}

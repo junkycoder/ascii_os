@@ -60,15 +60,17 @@ replaceOnce(
   'cache-bust stamp'
 );
 
-// 3c. load + init mobile.js after the shell is created. Browser-safe: the
-//     module no-ops when Capacitor is absent. Inserted right before the frame
-//     loop wiring so `engine` and `shell` already exist.
+// 3c. load + init mobile.js right after the engine starts — BEFORE login — so
+//     the native splash hides as soon as ANY UI (login screen or shell) is up,
+//     not only after a successful login (which left first-launch users staring
+//     at the splash forever). Browser-safe: the module no-ops without Capacitor.
+//     The back handler in mobile.js resolves the shell lazily from window.shell.
 replaceOnce(
-  /(\n[ \t]*(?:const \w+ = )?engine\.onFrame\(\(\) => shell\.render\(\)\);)/,
-  "\n    // mobile: native Capacitor integration (no-op in a plain browser)\n" +
+  /(\n[ \t]*engine\.start\(\);)/,
+  "$1\n    // mobile: native Capacitor integration (no-op in a plain browser)\n" +
   "    import('./src/mobile.js' + V)\n" +
-  "      .then((m) => m.initMobile && m.initMobile(engine, shell))\n" +
-  "      .catch(() => {});\n$1",
+  "      .then((m) => m.initMobile && m.initMobile(engine))\n" +
+  "      .catch(() => {});",
   'mobile.js loader'
 );
 
