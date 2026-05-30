@@ -17,6 +17,11 @@ import { signal, computed, effect } from './signals.js';
 
 const MIN_W = 10;
 const MIN_H = 4;
+// Cells reserved per title-bar button. Each button's hit target spans this
+// many columns (× 3 rows on touch), so on a phone (~8px cell width) the tap
+// area clears the 32px platform minimum. Render draws the glyph at the slot's
+// right edge with the rest as separating space.
+const BTN_STEP = 4;
 
 let _autoId = 0;
 
@@ -231,9 +236,10 @@ export function createWindowManager(engine, opts = {}) {
       const localY = py - wy;
 
       // Touch fingers are far bigger than one cell. Give title buttons a
-      // 2-row-tall target (title row + the row directly below it) so close /
-      // minimize / maximize are comfortably tappable. Mouse stays pixel-exact.
-      if (touch && (localY === 0 || localY === 1) && wh >= 2) {
+      // 3-row-tall target (title row + two rows below) so close / minimize /
+      // maximize clear the 32px minimum on a phone. Mouse stays pixel-exact.
+      // Don't eat the bottom border row of short windows.
+      if (touch && localY >= 0 && localY <= 2 && localY < wh - 1) {
         const btn = hitTitleButton(win, localX, ww, true);
         if (btn) return { win, zone: 'btn', btn };
       }
@@ -262,10 +268,11 @@ export function createWindowManager(engine, opts = {}) {
     return null;
   }
 
-  // Layout of the right-side buttons in the title bar.
-  // We render up to three buttons: [_] [□] [×], each occupies one cell with a
-  // single-cell gap between them, anchored to ww-2 (last cell is right border).
-  // Returns the button id or null.
+  // Layout of the right-side buttons in the title bar. Up to three buttons
+  // [_] [□] [×], each owning a BTN_STEP-wide slot anchored at ww-2 (glyph on
+  // the slot's right edge; last cell ww-1 is the right border). Returns the
+  // button id or null. The whole slot is the hit target so the tappable area
+  // matches the rendered spacing — full BTN_STEP width regardless of touch.
   function hitTitleButton(win, localX, ww, touch = false) {
     const buttons = visibleButtons(win);
     if (!buttons.length) return null;
@@ -274,14 +281,10 @@ export function createWindowManager(engine, opts = {}) {
     // where cell rounding at the viewport edge can miss by one.
     if (localX === ww - 1) return buttons[buttons.length - 1];
 
-    // Each button covers a slice of cells: the glyph + cells to its left.
-    // Mouse uses a 2-cell slice (glyph + separator). Touch widens to 3 cells
-    // per button so fingers can land reliably.
-    const slice = touch ? 3 : 2;
     let cursor = ww - 2;
     for (let i = buttons.length - 1; i >= 0; i--) {
-      if (localX <= cursor && localX > cursor - slice) return buttons[i];
-      cursor -= slice;
+      if (localX <= cursor && localX > cursor - BTN_STEP) return buttons[i];
+      cursor -= BTN_STEP;
       if (cursor < 1) break;
     }
     return null;
@@ -535,9 +538,9 @@ export function createWindowManager(engine, opts = {}) {
     const buttons = visibleButtons(win);
     let btnCells = 0;
     if (buttons.length > 0) {
-      // Each button takes 1 cell + 1 separator cell, except no separator after
-      // the rightmost button (it sits at ww-2, last cell is right border).
-      btnCells = buttons.length * 2 - 1 + 1; // +1 pad before buttons
+      // Each button owns a BTN_STEP-cell slot so the tap target clears the
+      // platform 32px minimum (BTN_STEP cells × 3 rows on touch). +1 pad.
+      btnCells = buttons.length * BTN_STEP + 1;
     }
 
     // Title text region: from x+1 .. x + w - 2 - btnCells.
@@ -563,7 +566,8 @@ export function createWindowManager(engine, opts = {}) {
       engine.text(titleStart, y, raw.slice(0, titleSpace), { fg: titleFg });
     }
 
-    // Buttons.
+    // Buttons. Each owns a BTN_STEP-wide slot; glyph sits at the slot's right
+    // edge (cursor), matching hitTitleButton's right-anchored slicing.
     const isMax = win.maximized.peek();
     let cursor = x + w - 2;
     for (let i = buttons.length - 1; i >= 0; i--) {
@@ -574,7 +578,8 @@ export function createWindowManager(engine, opts = {}) {
       else glyph = '_';
       const color = id === 'close' ? colors.error : colors.accent;
       engine.put(cursor, y, glyph, { fg: color, bold: true });
-      cursor -= 2;
+      cursor -= BTN_STEP;
+      if (cursor <= x) break; // don't overwrite the left border on narrow windows
     }
   }
 
