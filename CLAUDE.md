@@ -3,8 +3,15 @@
 ASCII-first UI framework + desktop shell for the browser. **Read `HANDOFF.md`
 for current state and the work backlog before starting.**
 
+## Repo / git
+- **Default branch is `trunk`** (not `main`). Remote: `origin`
+  (`git@github.com:junkycoder/ascii_os.git`). Base PRs / merges on `trunk`.
+
 ## Non-negotiable constraints
 - **Zero dependencies. No build step. No TypeScript.** Vanilla ES modules only.
+  (The Capacitor iOS wrapper — `package.json`, `tools/build-www.mjs`, `www/` —
+  is a dev-time native shell only; it adds no runtime deps to `src/`. See
+  `CAPACITOR.md`.)
 - Must run "anywhere the web runs" — desktop, mobile (touch), TV. Keep it text.
 - Everything renders into one DOM cell grid via the engine. No canvas, no SVG.
 - Text in the grid stays copyable / accessible.
