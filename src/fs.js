@@ -96,6 +96,45 @@ export function createFS(opts = {}) {
   const subs = new Map(); // path -> Set<fn>
   const mounts = new Map(); // mountPath -> { handle, mode }
 
+  // --- mount cache (sync view over async File System Access handles) ---
+  // The public API (exists/stat/list/read*) is synchronous, but the File
+  // System Access API is async. We bridge by keeping a synchronous cache of
+  // what we have discovered by walking handles, and refreshing it in the
+  // background. Each refresh that changes anything bumps `changes` (+ notify),
+  // so subscribers (e.g. the finder tree) re-render and pick up the new data.
+  //
+  // dirCache:  fullDirPath  -> { entries: [{name,type,size,mtime}], at: number }
+  // fileCache: fullFilePath -> { type:'file', size, mtime, text?, bytes?:ArrayBuffer }
+  const dirCache = new Map();
+  const fileCache = new Map();
+  const inflight = new Set();   // fullPaths currently being refreshed (dedupe)
+  const REFRESH_TTL = 1500;     // ms; re-walk a dir listing at most this often
+
+  function fullMountPath(m) {
+    return m.mountPath + (m.rest ? '/' + m.rest : '');
+  }
+
+  // Fire-and-forget an async refresh, dedup by key, bump `changes` if the
+  // cache actually changed. Never throws into callers.
+  function scheduleRefresh(key, fn) {
+    if (inflight.has(key)) return;
+    inflight.add(key);
+    Promise.resolve()
+      .then(fn)
+      .then((changed) => { if (changed) notify(key); })
+      .catch(() => { /* permission revoked / removed entry — ignore */ })
+      .finally(() => { inflight.delete(key); });
+  }
+
+  function entriesEqual(a, b) {
+    if (!a || !b || a.length !== b.length) return false;
+    for (let i = 0; i < a.length; i++) {
+      if (a[i].name !== b[i].name || a[i].type !== b[i].type ||
+          a[i].size !== b[i].size || a[i].mtime !== b[i].mtime) return false;
+    }
+    return true;
+  }
+
   // The store: Map<path, {type:'file'|'dir', content?:string, mtime:number, binary?:boolean}>
   const store = new Map();
   store.set('/', { type: 'dir', mtime: Date.now() });
@@ -209,14 +248,14 @@ export function createFS(opts = {}) {
   function exists(path) {
     path = normalize(path);
     const m = findMount(path);
-    if (m) return mountExists(m);
+    if (m) return mountExistsSync(m);
     return path === '/' || store.has(path);
   }
 
   function stat(path) {
     path = normalize(path);
     const m = findMount(path);
-    if (m) return mountStat(m);
+    if (m) return mountStatSync(m);
     if (path === '/') return { type: 'dir', size: 0, mtime: 0 };
     const node = store.get(path);
     if (!node) return null;
@@ -241,7 +280,9 @@ export function createFS(opts = {}) {
   function list(path) {
     path = normalize(path);
     const m = findMount(path);
-    if (m && m.rest !== '') return mountList(m);
+    // Any path inside a mount (root or deeper) is served from the sync mount
+    // cache; a background refresh keeps it fresh and bumps `changes`.
+    if (m) return mountListSync(m);
     // Gather direct children of path from in-memory store.
     const prefix = path === '/' ? '/' : path + '/';
     const out = [];
@@ -269,10 +310,6 @@ export function createFS(opts = {}) {
         out.push({ name, type: 'dir', size: 0, mtime: 0 });
       }
     }
-    // If this path is a mount root, also include mount contents via async-shim entries.
-    if (m && m.rest === '') {
-      // synchronous list returns just what we know; consumer can call list again after refresh.
-    }
     // Also include mount points whose parent is this path.
     for (const mp of mounts.keys()) {
       const par = parentOf(mp);
@@ -294,7 +331,7 @@ export function createFS(opts = {}) {
   function read(path) {
     path = normalize(path);
     const m = findMount(path);
-    if (m) return mountRead(m, 'auto');
+    if (m) return mountReadSync(m, 'auto');
     const node = store.get(path);
     if (!node || node.type !== 'file') throw new Error('Not a file: ' + path);
     if (node.binary) return base64ToBytes(node.content || '').buffer;
@@ -304,7 +341,7 @@ export function createFS(opts = {}) {
   function readText(path) {
     path = normalize(path);
     const m = findMount(path);
-    if (m) return mountRead(m, 'text');
+    if (m) return mountReadSync(m, 'text');
     const node = store.get(path);
     if (!node || node.type !== 'file') throw new Error('Not a file: ' + path);
     if (node.binary) {
@@ -317,11 +354,32 @@ export function createFS(opts = {}) {
   function readBytes(path) {
     path = normalize(path);
     const m = findMount(path);
-    if (m) return mountRead(m, 'bytes');
+    if (m) return mountReadSync(m, 'bytes');
     const node = store.get(path);
     if (!node || node.type !== 'file') throw new Error('Not a file: ' + path);
     if (node.binary) return base64ToBytes(node.content || '').buffer;
     return new TextEncoder().encode(node.content || '').buffer;
+  }
+
+  // Async variants for callers that can await (e.g. shell when blob-loading a
+  // mounted media file). These hit the live handle and also warm the cache.
+  async function readAsync(path) {
+    path = normalize(path);
+    const m = findMount(path);
+    if (m) return mountRead(m, 'auto');
+    return read(path);
+  }
+  async function readTextAsync(path) {
+    path = normalize(path);
+    const m = findMount(path);
+    if (m) return mountRead(m, 'text');
+    return readText(path);
+  }
+  async function readBytesAsync(path) {
+    path = normalize(path);
+    const m = findMount(path);
+    if (m) return mountRead(m, 'bytes');
+    return readBytes(path);
   }
 
   function write(path, data) {
@@ -499,6 +557,14 @@ export function createFS(opts = {}) {
     }
     ensureDir(parentOf(mountPath));
     mounts.set(mountPath, { handle, mode });
+    // Seed an empty cache entry so the mount root is immediately listable
+    // (even before the first walk completes), then warm it from the handle.
+    if (!dirCache.has(mountPath)) {
+      dirCache.set(mountPath, { entries: [], at: 0 });
+    }
+    // Await the first listing so callers that mount-then-list synchronously
+    // (and re-render on `changes`) see real entries right away.
+    try { await refreshDir(mountPath); } catch (_) { /* permission/empty */ }
     notify(mountPath);
     return { at: mountPath, name: handle.name, mode };
   }
@@ -507,13 +573,24 @@ export function createFS(opts = {}) {
     mountPath = normalize(mountPath);
     if (!mounts.has(mountPath)) return false;
     mounts.delete(mountPath);
+    // Drop any cached entries under this mount.
+    const prefix = mountPath + '/';
+    for (const k of [...dirCache.keys()]) {
+      if (k === mountPath || k.startsWith(prefix)) dirCache.delete(k);
+    }
+    for (const k of [...fileCache.keys()]) {
+      if (k.startsWith(prefix)) fileCache.delete(k);
+    }
     notify(mountPath);
     return true;
   }
 
-  // --- mount operation helpers (async-leaning but we offer best-effort sync where possible) ---
-  // Since the public API is synchronous, mount file ops return promises for read/write.
-  // exists/stat/list cache nothing — they walk handles on demand and may return promises.
+  // --- mount operation helpers ---
+  // The public read API (exists/stat/list/read*) is synchronous and answers
+  // from dirCache / fileCache. Each call also schedules a background refresh
+  // that walks the live handle; when the cache changes we notify() so the UI
+  // re-renders with fresh data. Write/delete/mkdir remain async (they return a
+  // promise) and invalidate the relevant cache on completion.
 
   async function resolveHandle(mountPath, rest, { createDirs = false } = {}) {
     const mount = mounts.get(mountPath);
@@ -528,46 +605,33 @@ export function createFS(opts = {}) {
     return { dir: h, name: fname };
   }
 
-  async function mountExists(m) {
-    try {
-      const { dir, name } = await resolveHandle(m.mountPath, m.rest);
-      if (!name) return true;
-      try { await dir.getFileHandle(name); return true; } catch (_) {}
-      try { await dir.getDirectoryHandle(name); return true; } catch (_) {}
-      return false;
-    } catch (_) { return false; }
-  }
+  // --- async walkers that populate the caches ---
 
-  async function mountStat(m) {
-    try {
-      const { dir, name } = await resolveHandle(m.mountPath, m.rest);
-      if (!name) return { type: 'dir', size: 0, mtime: 0, mount: true };
-      try {
-        const fh = await dir.getFileHandle(name);
-        const f = await fh.getFile();
-        return { type: 'file', size: f.size, mtime: f.lastModified, mount: true };
-      } catch (_) {}
-      try {
-        await dir.getDirectoryHandle(name);
-        return { type: 'dir', size: 0, mtime: 0, mount: true };
-      } catch (_) {}
-      return null;
-    } catch (_) { return null; }
-  }
-
-  async function mountList(m) {
+  // Walk one directory's immediate children into dirCache. Returns true if the
+  // cached listing changed.
+  async function refreshDir(fullDirPath) {
+    const m = findMount(fullDirPath);
+    if (!m) return false;
     const { dir, name } = await resolveHandle(m.mountPath, m.rest);
     let target = dir;
     if (name) target = await dir.getDirectoryHandle(name);
     const out = [];
     for await (const [n, h] of target.entries()) {
+      const childFull = fullDirPath + '/' + n;
       if (h.kind === 'file') {
+        let size = 0, mtime = 0;
         try {
           const f = await h.getFile();
-          out.push({ name: n, type: 'file', size: f.size, mtime: f.lastModified, mount: true });
-        } catch (_) {
-          out.push({ name: n, type: 'file', size: 0, mtime: 0, mount: true });
-        }
+          size = f.size; mtime = f.lastModified;
+        } catch (_) {}
+        out.push({ name: n, type: 'file', size, mtime, mount: true });
+        // Record a lightweight stat in fileCache (without content).
+        const prev = fileCache.get(childFull);
+        fileCache.set(childFull, {
+          type: 'file', size, mtime,
+          text: prev ? prev.text : undefined,
+          bytes: prev ? prev.bytes : undefined,
+        });
       } else {
         out.push({ name: n, type: 'dir', size: 0, mtime: 0, mount: true });
       }
@@ -576,7 +640,102 @@ export function createFS(opts = {}) {
       if (a.type !== b.type) return a.type === 'dir' ? -1 : 1;
       return a.name.localeCompare(b.name);
     });
-    return out;
+    const prev = dirCache.get(fullDirPath);
+    const changed = !prev || !entriesEqual(prev.entries, out);
+    dirCache.set(fullDirPath, { entries: out, at: Date.now() });
+    return changed;
+  }
+
+  // Load a mounted file's content into fileCache. Returns true if changed.
+  async function refreshFile(fullFilePath, kind) {
+    const m = findMount(fullFilePath);
+    if (!m || !m.rest) return false;
+    const { dir, name } = await resolveHandle(m.mountPath, m.rest);
+    const fh = await dir.getFileHandle(name);
+    const f = await fh.getFile();
+    const prev = fileCache.get(fullFilePath) || {};
+    const next = {
+      type: 'file', size: f.size, mtime: f.lastModified,
+      text: prev.text, bytes: prev.bytes,
+    };
+    if (kind === 'text' || (kind === 'auto' && isTextPath(fullFilePath))) {
+      next.text = await f.text();
+    } else {
+      next.bytes = await f.arrayBuffer();
+    }
+    const changed = prev.size !== next.size || prev.mtime !== next.mtime
+      || prev.text !== next.text || prev.bytes !== next.bytes;
+    fileCache.set(fullFilePath, next);
+    return changed;
+  }
+
+  // --- synchronous, cache-backed mount reads ---
+
+  function mountListSync(m) {
+    const full = fullMountPath(m);
+    const cached = dirCache.get(full);
+    // Refresh if missing or stale.
+    if (!cached || Date.now() - cached.at > REFRESH_TTL) {
+      scheduleRefresh('list:' + full, () => refreshDir(full));
+    }
+    return cached ? cached.entries.slice() : [];
+  }
+
+  function mountStatSync(m) {
+    const full = fullMountPath(m);
+    if (!m.rest) {
+      // mount root
+      return { type: 'dir', size: 0, mtime: 0, mount: true };
+    }
+    const fc = fileCache.get(full);
+    if (fc) {
+      return { type: 'file', size: fc.size, mtime: fc.mtime, mount: true };
+    }
+    // Maybe it's a directory we've seen listed under its parent.
+    const dc = dirCache.get(full);
+    if (dc) return { type: 'dir', size: 0, mtime: 0, mount: true };
+    // Unknown: infer type from the parent listing if available, else assume
+    // dir (so the tree can try to expand it) and schedule a refresh.
+    const parent = parentOf(full);
+    const pc = dirCache.get(parent);
+    if (pc) {
+      const entry = pc.entries.find(e => e.name === basename(full));
+      if (entry) {
+        if (entry.type === 'file') {
+          return { type: 'file', size: entry.size, mtime: entry.mtime, mount: true };
+        }
+        return { type: 'dir', size: 0, mtime: 0, mount: true };
+      }
+    }
+    scheduleRefresh('list:' + parent, () => refreshDir(parent));
+    return null;
+  }
+
+  function mountExistsSync(m) {
+    const full = fullMountPath(m);
+    if (!m.rest) return mounts.has(m.mountPath);
+    if (fileCache.has(full) || dirCache.has(full)) return true;
+    const parent = parentOf(full);
+    const pc = dirCache.get(parent);
+    if (pc) return pc.entries.some(e => e.name === basename(full));
+    scheduleRefresh('list:' + parent, () => refreshDir(parent));
+    // Unknown until refresh lands; report false for now (caller re-renders on notify).
+    return false;
+  }
+
+  function mountReadSync(m, kind) {
+    const full = fullMountPath(m);
+    if (!m.rest) throw new Error('Is a directory: ' + full);
+    const fc = fileCache.get(full);
+    const want = (kind === 'text' || (kind === 'auto' && isTextPath(full))) ? 'text' : 'bytes';
+    if (fc && fc[want] !== undefined) {
+      if (want === 'text') return fc.text;
+      return fc.bytes;            // ArrayBuffer
+    }
+    // Not loaded yet — schedule a load and return an empty placeholder. The
+    // refresh bumps `changes`, so the finder re-reads on its next render.
+    scheduleRefresh('read:' + want + ':' + full, () => refreshFile(full, kind));
+    return want === 'text' ? '' : new ArrayBuffer(0);
   }
 
   async function mountRead(m, kind) {
@@ -603,20 +762,29 @@ export function createFS(opts = {}) {
       else throw new Error('Unsupported data type for mount write');
     }
     await w.close();
-    notify(m.mountPath + (m.rest ? '/' + m.rest : ''));
+    const full = fullMountPath(m);
+    fileCache.delete(full);                 // force re-read of new content
+    try { await refreshDir(parentOf(full)); } catch (_) {}
+    notify(full);
   }
 
   async function mountDelete(m) {
     const { dir, name } = await resolveHandle(m.mountPath, m.rest);
     if (!name) throw new Error('Cannot delete mount root via fs.delete; use unmount');
     await dir.removeEntry(name, { recursive: false });
-    notify(m.mountPath + '/' + m.rest);
+    const full = fullMountPath(m);
+    fileCache.delete(full);
+    dirCache.delete(full);
+    try { await refreshDir(parentOf(full)); } catch (_) {}
+    notify(full);
   }
 
   async function mountMkdir(m) {
     const { dir, name } = await resolveHandle(m.mountPath, m.rest, { createDirs: true });
     if (name) await dir.getDirectoryHandle(name, { create: true });
-    notify(m.mountPath + (m.rest ? '/' + m.rest : ''));
+    const full = fullMountPath(m);
+    try { await refreshDir(parentOf(full)); } catch (_) {}
+    notify(full);
   }
 
   // initialize
@@ -629,6 +797,9 @@ export function createFS(opts = {}) {
     read,
     readText,
     readBytes,
+    readAsync,
+    readTextAsync,
+    readBytesAsync,
     write,
     delete: del,
     mkdir,
@@ -640,5 +811,17 @@ export function createFS(opts = {}) {
     canMountLocal,
     mountLocal,
     unmount,
+    // Force a re-walk of a mounted directory (or the dir containing a file)
+    // and bump `changes` if anything changed. Safe no-op for non-mount paths.
+    refresh(path) {
+      path = normalize(path);
+      const m = findMount(path);
+      if (!m) return Promise.resolve(false);
+      const st = mountStatSync(m);
+      const dirPath = (st && st.type === 'file') ? parentOf(path) : path;
+      return refreshDir(dirPath)
+        .then((changed) => { if (changed) notify(dirPath); return changed; })
+        .catch(() => false);
+    },
   };
 }
