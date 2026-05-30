@@ -25,14 +25,29 @@ export function initMobile(engine, shell) {
   //    hide once the web app is up.
   try { P.SplashScreen && P.SplashScreen.hide(); } catch (_) {}
 
-  // ── Status bar: light text over the dark OS theme; overlay so the grid can
-  //    use the full screen (safe-area handled by contentInset:always).
+  // ── Status bar: hide it entirely and let the WebView extend underneath, so
+  //    the grid reclaims that strip (content sits higher). The CSS safe-area
+  //    padding on #app still keeps the title bars below the notch / Dynamic
+  //    Island, so nothing important hides under the camera cutout.
   try {
     if (P.StatusBar) {
-      P.StatusBar.setStyle({ style: 'DARK' });          // 'DARK' = light content
-      P.StatusBar.setBackgroundColor &&
-        P.StatusBar.setBackgroundColor({ color: '#000000' });
+      // overlay:true → WebView draws full-screen, status bar floats over it;
+      // hide() then removes the bar completely, freeing the top strip.
+      P.StatusBar.setOverlaysWebView &&
+        P.StatusBar.setOverlaysWebView({ overlay: true });
+      P.StatusBar.setStyle && P.StatusBar.setStyle({ style: 'DARK' });
+      P.StatusBar.hide && P.StatusBar.hide();
     }
+  } catch (_) {}
+
+  // After the native bars settle, the safe-area insets change — nudge the web
+  // app to recompute its grid so window sizes (and the bottom border) fit the
+  // real content box. index.html listens for 'resize' → reflow.
+  try {
+    const kick = () => { try { window.dispatchEvent(new Event('resize')); } catch (_) {} };
+    setTimeout(kick, 50);
+    setTimeout(kick, 250);
+    setTimeout(kick, 600);
   } catch (_) {}
 
   // ── Hardware/back gesture (iOS has none, but App plugin still fires on
