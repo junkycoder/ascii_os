@@ -22,5 +22,9 @@ jobs:
         uses: cloudflare/wrangler-action@v3
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          # Pin Wrangler 4.x — the action otherwise falls back to 3.90.0, which
+          # can't read wrangler.jsonc (only .toml/.json) and fails with
+          # "Missing entry-point". Keep roughly in step with the local CLI.
+          wranglerVersion: "4.95.0"
           # account_id lives in wrangler.jsonc; no build step (zero-deps shell).
           command: deploy
