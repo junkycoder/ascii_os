@@ -21,6 +21,7 @@ import { createDrafts } from '../drafts.js';
 import { createVim } from '../vim.js';
 import { createUser } from '../user.js';
 import { langForPath, highlight, roleColor } from '../syntax.js';
+import { createMarkdownView } from '../markdown.js';
 
 const SAVE_FLASH_MS = 1000;
 
@@ -106,6 +107,47 @@ export function createApp(initialCtx, win) {
     hlCache = { text, lang, rows };
     return rows;
   }
+  // Markdown preview (classic mode renders .md styled like the web via the
+  // shared markdown view; vim mode shows raw source with md highlighting).
+  let mdView = null;
+  let mdViewSource = null;
+  function ensureMdView(source) {
+    if (!mdView) { mdView = createMarkdownView({ source, w: 1, h: 1 }); mdViewSource = source; }
+    else if (mdViewSource !== source) { mdView.setSource(source); mdViewSource = source; }
+    return mdView;
+  }
+  function mdPreviewActive() {
+    return !vim && editorPath && editorBinarySize < 0 && !editorLoadError
+      && langForPath(editorPath) === 'md';
+  }
+  // A clipped, offset drawing surface so the markdown view (which draws from
+  // 0,0) renders inside the editor's inner rect.
+  function offsetCtx(ctx, ox, oy, w, h) {
+    const clip = (x, y) => x >= 0 && y >= 0 && x < w && y < h;
+    return {
+      width: w, height: h, theme: ctx.theme, fps: ctx.fps, mode: ctx.mode,
+      put(x, y, ch, st) { if (clip(x, y)) ctx.put(ox + x, oy + y, ch, st); },
+      text(x, y, s, st) {
+        if (!s) return;
+        for (let i = 0; i < s.length; i++) {
+          const cx = x + i;
+          if (cx < 0) continue; if (cx >= w) break; if (y < 0 || y >= h) break;
+          ctx.put(ox + cx, oy + y, s[i], st);
+        }
+      },
+      rect(x, y, rw, rh, st) {
+        for (let dy = 0; dy < rh; dy++) for (let dx = 0; dx < rw; dx++)
+          if (clip(x + dx, y + dy)) ctx.put(ox + x + dx, oy + y + dy, (st && st.ch) || ' ', st);
+      },
+      box(x, y, bw, bh, st) {
+        const g = ctx.theme.peek().glyphs[(st && st.glyphSet) || 'border'];
+        this.text(x, y, g.tl + g.h.repeat(Math.max(0, bw - 2)) + g.tr, st);
+        this.text(x, y + bh - 1, g.bl + g.h.repeat(Math.max(0, bw - 2)) + g.br, st);
+        for (let i = 1; i < bh - 1; i++) { this.put(x, y + i, g.v, st); this.put(x + bw - 1, y + i, g.v, st); }
+      },
+    };
+  }
+
   // Draw a pre-tokenized line as colored spans, clipped to maxW columns.
   function drawSpans(ctx, x, y, spans, maxW, colors, bg) {
     let col = 0;
@@ -654,6 +696,15 @@ export function createApp(initialCtx, win) {
 
     // Syntax highlighting by file extension (cached; re-tokenized on change).
     const lang = langForPath(editorPath);
+
+    // Markdown in classic mode → styled, web-like preview (read-only, scrolls).
+    // Switch to vim (F9) to edit the raw source with markdown highlighting.
+    if (lang === 'md' && !vim) {
+      const view = ensureMdView(lines.join('\n'));
+      view.render(offsetCtx(ctx, innerX, innerY, innerW, innerH));
+      return;
+    }
+
     const hlRows = lang ? highlightRows(lines.join('\n'), lang) : null;
 
     if (curRow < editorScrollY) editorScrollY = curRow;
@@ -895,6 +946,12 @@ export function createApp(initialCtx, win) {
       }
 
       // ── Editor focus ──
+      // Markdown preview (classic .md): keys scroll the styled view; switch to
+      // vim (F9, handled above) to edit the raw source.
+      if (mdPreviewActive()) {
+        if (mdView && mdView.onKey) mdView.onKey(e);
+        return;
+      }
       if (vim) {
         // Route everything through the vim engine. It returns true when it
         // consumed the key. We mark dirty + schedule a draft when the buffer
@@ -957,6 +1014,14 @@ export function createApp(initialCtx, win) {
         if (e.type === 'click' || e.type === 'mousedown') showAbout = false;
         return;
       }
+      // Wheel over the markdown preview scrolls the styled view.
+      if (e.type === 'wheel') {
+        if (mdPreviewActive() && mdView) {
+          if (mdView.onMouse) mdView.onMouse(e);
+          else if (mdView.scroll) mdView.scroll(e.deltaY > 0 ? 3 : -3);
+        }
+        return;
+      }
       if (e.type !== 'click' && e.type !== 'mousedown' && e.type !== 'dblclick') return;
       const W = initialCtx.width;
       const H = initialCtx.height;
@@ -1007,6 +1072,8 @@ export function createApp(initialCtx, win) {
         if (focus === 'tree') {
           if (e.dir === 'up') moveSelection(3);
           else if (e.dir === 'down') moveSelection(-3);
+        } else if (mdPreviewActive() && mdView) {
+          if (mdView.scroll) mdView.scroll(e.dir === 'up' ? 3 : -3);
         } else {
           const lines = vim ? vim.lines : editorLines;
           if (e.dir === 'up') {

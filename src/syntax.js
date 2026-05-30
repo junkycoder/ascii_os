@@ -21,6 +21,7 @@ const EXT_LANG = {
   html: 'html', htm: 'html', xml: 'html', svg: 'html', vue: 'html',
   py: 'py',
   sh: 'sh', bash: 'sh', zsh: 'sh',
+  md: 'md', markdown: 'md', mdown: 'md', mkd: 'md',
 };
 
 export function langForPath(path) {
@@ -310,6 +311,59 @@ function tokenizeTag(tag, spans) {
   }
 }
 
+// ── Markdown (raw view, e.g. while editing in vim) ──────────────────
+function tokenizeMarkdown(line, st) {
+  // Fenced code block: everything between ``` fences is a string.
+  if (line.trimStart().startsWith('```')) {
+    return { spans: [{ text: line, role: 'keyword' }], state: { ...st, fence: !st.fence } };
+  }
+  if (st.fence) return { spans: [{ text: line, role: 'string' }], state: st };
+
+  // Heading.
+  if (/^\s*#{1,6}\s/.test(line)) return { spans: [{ text: line, role: 'keyword' }], state: st };
+  // Blockquote.
+  if (/^\s*>/.test(line)) return { spans: [{ text: line, role: 'comment' }], state: st };
+  // Horizontal rule.
+  if (/^\s*([-*_])(\s*\1){2,}\s*$/.test(line)) return { spans: [{ text: line, role: 'punct' }], state: st };
+
+  const spans = [];
+  let i = 0; const n = line.length;
+  // Leading list marker.
+  const lm = line.match(/^(\s*)([-*+]|\d+\.)(\s+)/);
+  if (lm) { spans.push({ text: lm[0], role: 'keyword' }); i = lm[0].length; }
+
+  let textStart = i;
+  const flush = (end) => { if (end > textStart) spans.push({ text: line.slice(textStart, end), role: 'text' }); };
+  while (i < n) {
+    const ch = line[i];
+    // inline code `...`
+    if (ch === '`') {
+      const close = line.indexOf('`', i + 1);
+      const end = close === -1 ? n : close + 1;
+      flush(i); spans.push({ text: line.slice(i, end), role: 'string' }); i = end; textStart = i; continue;
+    }
+    // bold ** or __
+    if ((ch === '*' && line[i + 1] === '*') || (ch === '_' && line[i + 1] === '_')) {
+      const mark = line.slice(i, i + 2);
+      const close = line.indexOf(mark, i + 2);
+      if (close !== -1) { flush(i); spans.push({ text: line.slice(i, close + 2), role: 'atom' }); i = close + 2; textStart = i; continue; }
+    }
+    // emphasis * or _
+    if (ch === '*' || ch === '_') {
+      const close = line.indexOf(ch, i + 1);
+      if (close !== -1 && close > i + 1) { flush(i); spans.push({ text: line.slice(i, close + 1), role: 'function' }); i = close + 1; textStart = i; continue; }
+    }
+    // link [text](url)
+    if (ch === '[') {
+      const m = line.slice(i).match(/^\[[^\]]*\]\([^)]*\)/);
+      if (m) { flush(i); spans.push({ text: m[0], role: 'attr' }); i += m[0].length; textStart = i; continue; }
+    }
+    i++;
+  }
+  flush(n);
+  return { spans, state: st };
+}
+
 // ── per-language line dispatcher ────────────────────────────────────
 function lineTokenizer(lang) {
   switch (lang) {
@@ -319,6 +373,7 @@ function lineTokenizer(lang) {
     case 'json': return (l) => tokenizeJson(l);
     case 'css':  return (l, s) => tokenizeCss(l, s);
     case 'html': return (l, s) => tokenizeHtml(l, s);
+    case 'md':   return (l, s) => tokenizeMarkdown(l, s);
     default:     return null;
   }
 }
