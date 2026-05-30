@@ -113,6 +113,8 @@ export function createShell(engine, opts = {}) {
   const persist = opts.persist !== false;
   const taskbarPos = signal(opts.taskbarPosition || 'bottom'); // bottom|top|hidden
   const backgroundKind = signal(opts.background || 'dots');
+  // Currently selected desktop file (for Quick-Look: spacebar previews it).
+  const selectedFile = signal(null);
 
   const wm = createWindowManager(engine);
 
@@ -611,9 +613,13 @@ export function createShell(engine, opts = {}) {
     // Running app chips
     for (const r of running.values()) {
       const isFocused = r.win.focused.peek();
-      const chip = ` ${r.spec.icon || '[]'} ${r.spec.label} `;
-      const fg = isFocused ? t.colors.bg : t.colors.fg;
-      const bg = isFocused ? t.colors.accent : t.colors.bg;
+      const isMin = wm.isMinimized(r.win.id);
+      // Minimized windows show their label in brackets + dimmed.
+      const chip = isMin
+        ? ` ${r.spec.icon || '[]'} (${r.spec.label}) `
+        : ` ${r.spec.icon || '[]'} ${r.spec.label} `;
+      const fg = isMin ? t.colors.fgDim : (isFocused ? t.colors.bg : t.colors.fg);
+      const bg = isFocused && !isMin ? t.colors.accent : t.colors.bg;
       if (cur + chip.length >= cols - 10) break;
       engine.text(cur, y, chip, { fg, bg });
       cur += chip.length + 1;
@@ -632,7 +638,9 @@ export function createShell(engine, opts = {}) {
     if (y < 0 || py !== y) return null;
     let cur = ' acii_os '.length + 1;
     for (const r of running.values()) {
-      const chip = ` ${r.spec.icon || '[]'} ${r.spec.label} `;
+      const chip = wm.isMinimized(r.win.id)
+        ? ` ${r.spec.icon || '[]'} (${r.spec.label}) `
+        : ` ${r.spec.icon || '[]'} ${r.spec.label} `;
       if (px >= cur && px < cur + chip.length) return { kind: 'chip', win: r.win };
       cur += chip.length + 1;
     }
@@ -666,13 +674,18 @@ export function createShell(engine, opts = {}) {
   function appForExt(ext) {
     switch ((ext || '').toLowerCase()) {
       case 'acii':                                            return 'paint';
+      // Media → Media Mogul (read-only browser): video / image / audio.
       case 'mp4': case 'webm': case 'mov': case 'ogv':
-      case 'm4v': case 'avi':                                 return 'video';
-      case 'md':                                              return 'finder';   // Finder edits it
+      case 'm4v': case 'avi': case 'mkv': case 'ogg':
+      case 'png': case 'jpg': case 'jpeg': case 'gif':
+      case 'bmp': case 'webp': case 'ico': case 'avif':
+      case 'mp3': case 'wav': case 'oga': case 'm4a':
+      case 'aac': case 'flac': case 'opus':                   return 'mediamogul';
+      case 'md':                                              return 'findman';  // Findman edits it
       case 'txt': case 'json': case 'js': case 'html':
       case 'css': case 'svg': case 'log': case 'csv':
-      case 'xml': case 'yml': case 'yaml':                    return 'finder';
-      default:                                                return 'finder';
+      case 'xml': case 'yml': case 'yaml':                    return 'findman';
+      default:                                                return 'findman';
     }
   }
   function openFile(path) {
@@ -771,7 +784,7 @@ export function createShell(engine, opts = {}) {
             if (!name) return;
             fs.mkdir(name);
           } },
-        { label: 'Open Finder',    onSelect: () => openOrFocus('finder') },
+        { label: 'Open Findman',   onSelect: () => openOrFocus('findman') },
         { type: 'separator' },
         { label: 'Background',
           items: Object.keys(PATTERNS).map(p => ({
@@ -899,7 +912,7 @@ export function createShell(engine, opts = {}) {
 
     if (e.type === 'mousedown' && e.button === 0) {
       const hit = taskbarHitTest(e.x, e.y);
-      if (hit?.kind === 'chip') { hit.win.focus(); return; }
+      if (hit?.kind === 'chip') { wm.toggleMinimize(hit.win.id); return; }
       // Start desktop drag only if NOT inside a window (WM handles its own drag)
       if (!pointInAnyWindow(e.x, e.y)) {
         // Close × on a widget — check before drag so user can hit it cleanly.
@@ -914,10 +927,12 @@ export function createShell(engine, opts = {}) {
         }
         const file = fileIconHitTest(e.x, e.y);
         if (file) {
+          selectedFile.value = '/desktop/' + file.name;  // Quick-Look target
           const pos = fileIcon(file.name);
           deskDrag = { kind: 'file', target: file.name, ox: e.x, oy: e.y, baseX: pos.x, baseY: pos.y, moved: false };
           return;
         }
+        selectedFile.value = null;  // click on empty desktop / app icon clears selection
         const app = iconHitTest(e.x, e.y);
         if (app) {
           const pos = iconPos(app.id);
@@ -990,7 +1005,7 @@ export function createShell(engine, opts = {}) {
     }
     if (e.type === 'tap') {
       const hit = taskbarHitTest(e.x, e.y);
-      if (hit?.kind === 'chip') { hit.win.focus(); return; }
+      if (hit?.kind === 'chip') { wm.toggleMinimize(hit.win.id); return; }
     }
     const f = wm.focused.peek();
     if (!f) return;
@@ -1037,6 +1052,25 @@ export function createShell(engine, opts = {}) {
       const f = wm.focused.peek();
       if (f) f.close();
       return;
+    }
+
+    // Minimize focused window: Ctrl/Cmd+M
+    if ((e.ctrl || e.meta) && keyIs(e, 'm') && !e.alt) {
+      e.raw?.preventDefault?.();
+      const f = wm.focused.peek();
+      if (f) wm.minimize(f.id);
+      return;
+    }
+
+    // Quick Look: spacebar previews the selected desktop file when no window
+    // is focused (so apps still receive their own space key while focused).
+    if (e.key === ' ' && !e.ctrl && !e.meta && !e.alt && !wm.focused.peek()) {
+      const sel = selectedFile.peek();
+      if (sel && fs.exists(sel)) {
+        e.raw?.preventDefault?.();
+        openFile(sel);
+        return;
+      }
     }
 
     // Cycle theme: Ctrl/Cmd+T

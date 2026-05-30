@@ -76,8 +76,8 @@
       { createApp: createNotes },
       { createApp: createPaint },
       { createApp: createReadme },
-      { createApp: createFinder },
-      { createApp: createVideo },
+      { createApp: createFindman },
+      { createApp: createMediaMogul },
       { createApp: createGameMaker },
     ] = await Promise.all([
       import('./src/engine.js' + V),
@@ -87,8 +87,8 @@
       import('./src/apps/notes.js' + V),
       import('./src/apps/paint.js' + V),
       import('./src/apps/readme.js' + V),
-      import('./src/apps/finder.js' + V),
-      import('./src/apps/video.js' + V),
+      import('./src/apps/findman.js' + V),
+      import('./src/apps/mediamogul.js' + V),
       import('./src/apps/gamemaker.js' + V),
     ]);
 
@@ -116,11 +116,11 @@
     // App registry
     const appRegistry = [
       { id: 'readme',    label: 'README',    icon: '[?]', factory: createReadme },
-      { id: 'finder',    label: 'Finder',    icon: '[▸]', factory: createFinder },
+      { id: 'findman',   label: 'Findman',   icon: '[▸]', factory: createFindman },
       { id: 'terminal',  label: 'Terminal',  icon: '[$]', factory: createTerminal },
       { id: 'notes',     label: 'Notes',     icon: '[≡]', factory: createNotes },
       { id: 'paint',     label: 'Paint',     icon: '[✎]', factory: createPaint },
-      { id: 'video',     label: 'Video',     icon: '[▶]', factory: createVideo },
+      { id: 'mediamogul',label: 'Media',     icon: '[▶]', factory: createMediaMogul },
       { id: 'gamemaker', label: 'GameMaker', icon: '[♛]', factory: createGameMaker },
       { id: 'snake',     label: 'Snake',     icon: '[●]', factory: createSnake },
     ];
