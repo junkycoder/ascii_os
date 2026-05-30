@@ -28,6 +28,14 @@ Verified functional end-to-end:
 - **System user** (`user.js`) — single system user owns settings/preferences
   (`vimEnabled`, `quicklook`, …) persisted to `acii.user.v1`. Shared singleton
   `globalThis.__aciiUser`.
+- **Accounts + login** (`users.js` + `login.js`) — account store + session with
+  salted-hash passwords (a TOY hash, not real security) and **per-user storage
+  keys** (the `default` account keeps the legacy `acii.fs.v1` / `acii.shell.v2`;
+  others namespaced `…::<id>`). `index.html` boots engine → ASCII login screen →
+  `bootShell(user)`; the shell shows a taskbar user chip with switch-user /
+  logout. Boot pre-creates the FS singleton with `users.fsKey(user)` so each
+  account gets its own FS + desktop. New-user / delete use `window.prompt/confirm`
+  (don't run in headless preview; fine in a real browser).
 - **Drafts** (`drafts.js`) — last unsaved edit per path, debounced to
   localStorage; restored on reopen, cleared on real save. Shared singleton
   `globalThis.__aciiDrafts`.
@@ -95,9 +103,12 @@ menu, or spacebar (Quick-Look) on the selection.
 3. **Media House depth** — confirm video/audio playback + seek inside the grid
    across themes; large files / unsupported codecs should fail gracefully (no
    URL prompt by design).
-4. **D1 / `/api/*`** — the worker just serves static assets today; server logic
+4. **Per-account temp backup / unsaved-restore** and surfacing `user.prefs`
+   (e.g. the vim toggle) across apps now that accounts/login landed (see DONE).
+   Drafts are global today; tie them to the active account namespace.
+5. **D1 / `/api/*`** — the worker just serves static assets today; server logic
    hangs off `worker/index.js` when the DB lands (`wrangler.jsonc` has the
-   commented `d1_databases` block ready).
+   commented `d1_databases` block ready). Could back real (non-toy) auth later.
 
 ## How to run / verify
 ```

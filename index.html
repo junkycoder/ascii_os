@@ -26,6 +26,16 @@
       env(safe-area-inset-bottom)
       env(safe-area-inset-left);
   }
+  /* Native iOS only (class set by src/mobile.js). With the status bar HIDDEN,
+     iOS reports a smaller safe-area-inset-top, so the grid would slide under
+     the Dynamic Island / notch. Reserve a minimum top inset so the top row
+     (hint banner, window title bars) clears the island — as if the status bar
+     were still there, just without the clock. Desktop stays untouched (no
+     class → plain env() above, which is 0). */
+  html.cap-native #app {
+    padding-top: max(env(safe-area-inset-top), 48px);
+    padding-bottom: max(env(safe-area-inset-bottom), 8px);
+  }
 
   .acii-root {
     background: var(--acii-bg, #000);
@@ -80,28 +90,19 @@
     // no-store, but Chromium's ESM module map can keep stale modules
     // across navigations on the same origin — query bust guarantees fresh.
     const V = '?v=' + Date.now();
+    // Lightweight first wave: engine + user store + login screen + FS factory.
+    // The shell and apps are imported lazily AFTER login, so the per-user FS
+    // singleton is in place before any app module evaluates its `||=` line.
     const [
       { createEngine, signal, effect, themes },
-      { createShell },
-      { createApp: createTerminal },
-      { createApp: createSnake },
-      { createApp: createNotes },
-      { createApp: createPaint },
-      { createApp: createReadme },
-      { createApp: createFindman },
-      { createApp: createMediaMogul },
-      { createApp: createGameMaker },
+      users,
+      { createLogin },
+      { createFS },
     ] = await Promise.all([
       import('./src/engine.js' + V),
-      import('./src/shell.js' + V),
-      import('./src/apps/terminal.js' + V),
-      import('./src/apps/snake.js' + V),
-      import('./src/apps/notes.js' + V),
-      import('./src/apps/paint.js' + V),
-      import('./src/apps/readme.js' + V),
-      import('./src/apps/findman.js' + V),
-      import('./src/apps/mediamogul.js' + V),
-      import('./src/apps/gamemaker.js' + V),
+      import('./src/users.js' + V),
+      import('./src/login.js' + V),
+      import('./src/fs.js' + V),
     ]);
 
     // ── Auto-size grid to viewport ──
@@ -138,26 +139,6 @@
       theme: initialTheme,
       fps: 30,
     });
-
-    // App registry
-    const appRegistry = [
-      { id: 'readme',    label: 'README',    icon: '[?]', factory: createReadme },
-      { id: 'findman',   label: 'Findman',   icon: '[▸]', factory: createFindman },
-      { id: 'terminal',  label: 'Terminal',  icon: '[$]', factory: createTerminal },
-      { id: 'notes',     label: 'Notes',     icon: '[≡]', factory: createNotes },
-      { id: 'paint',     label: 'Paint',     icon: '[✎]', factory: createPaint },
-      { id: 'mediamogul',label: 'Media House',icon: '[▶]', factory: createMediaMogul },
-      { id: 'gamemaker', label: 'GameMaker', icon: '[♛]', factory: createGameMaker },
-      { id: 'snake',     label: 'Snake',     icon: '[●]', factory: createSnake },
-    ];
-
-    const shell = createShell(engine, {
-      apps: appRegistry,
-      background: 'dots',
-      taskbarPosition: 'bottom',
-    });
-
-    engine.onFrame(() => shell.render());
     engine.start();
 
     // ── Responsive resize ──
@@ -181,15 +162,86 @@
       document.getElementById('boot').classList.add('hidden');
     }, 200);
 
-    // First-run: open README so the user has something to read
-    if (shell.running.size === 0) {
-      setTimeout(() => shell.openApp('readme'), 50);
+    window.engine = engine;
+    window.themes = themes;
+    window.users = users;
+
+    // ── Boot the desktop shell for a logged-in user ─────────────────
+    async function bootShell(user) {
+      // Seed the per-user FS singleton BEFORE importing shell/apps so their
+      // `globalThis.__aciiFS ||= createFS(...)` lines adopt this instance.
+      globalThis.__aciiFS = createFS({ storageKey: users.fsKey(user) });
+
+      const [
+        { createShell },
+        { createApp: createTerminal },
+        { createApp: createSnake },
+        { createApp: createNotes },
+        { createApp: createPaint },
+        { createApp: createReadme },
+        { createApp: createFindman },
+        { createApp: createMediaMogul },
+        { createApp: createGameMaker },
+      ] = await Promise.all([
+        import('./src/shell.js' + V),
+        import('./src/apps/terminal.js' + V),
+        import('./src/apps/snake.js' + V),
+        import('./src/apps/notes.js' + V),
+        import('./src/apps/paint.js' + V),
+        import('./src/apps/readme.js' + V),
+        import('./src/apps/findman.js' + V),
+        import('./src/apps/mediamogul.js' + V),
+        import('./src/apps/gamemaker.js' + V),
+      ]);
+
+      const appRegistry = [
+        { id: 'readme',    label: 'README',    icon: '[?]', factory: createReadme },
+        { id: 'findman',   label: 'Findman',   icon: '[▸]', factory: createFindman },
+        { id: 'terminal',  label: 'Terminal',  icon: '[$]', factory: createTerminal },
+        { id: 'notes',     label: 'Notes',     icon: '[≡]', factory: createNotes },
+        { id: 'paint',     label: 'Paint',     icon: '[✎]', factory: createPaint },
+        { id: 'mediamogul',label: 'Media House',icon: '[▶]', factory: createMediaMogul },
+        { id: 'gamemaker', label: 'GameMaker', icon: '[♛]', factory: createGameMaker },
+        { id: 'snake',     label: 'Snake',     icon: '[●]', factory: createSnake },
+      ];
+
+      const shell = createShell(engine, {
+        apps: appRegistry,
+        background: 'dots',
+        taskbarPosition: 'bottom',
+        storageKey: users.shellKey(user),
+        user,
+        onLogout: () => { users.clearSession(); location.reload(); },
+      });
+
+      const offFrame = engine.onFrame(() => shell.render());
+
+      // First-run for this user: open README so there's something to read.
+      if (shell.running.size === 0) {
+        setTimeout(() => shell.openApp('readme'), 50);
+      }
+
+      window.shell = shell;
     }
 
-    // expose
-    window.engine = engine;
-    window.shell = shell;
-    window.themes = themes;
+    // ── Login → shell handoff ───────────────────────────────────────
+    function startLogin() {
+      const login = createLogin(engine, {
+        onLogin: async (user) => {
+          login.destroy();      // stop login render + input
+          await bootShell(user);
+        },
+      });
+      window.login = login;
+    }
+
+    // Stay logged in across reloads; show the login screen otherwise.
+    const session = users.getSession();
+    if (session) {
+      await bootShell(session.user);
+    } else {
+      startLogin();
+    }
   </script>
 </body>
 </html>

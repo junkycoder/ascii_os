@@ -62,9 +62,15 @@ signals → engine → { fs, user, drafts, themes } → { wm, ui, ui-menu, markd
 - **`engine.js`** — owns the cell buffer, the DOM diff renderer, the 30 fps loop,
   and all input. Draw with `put` / `text` / `box` / `rect`; clip with
   `subContext`.
-- **`shell.js`** — the desktop: icons, taskbar, widgets (clock / stats / note /
-  music), wallpaper, context menus, file drop, the global keymap, and **input
-  routing to the focused app**. This is the integration hub.
+- **`shell.js`** — the desktop: icons, taskbar (with a user chip), widgets
+  (clock / stats / note / music), wallpaper, context menus, file drop, the
+  global keymap, and **input routing to the focused app**. This is the
+  integration hub.
+- **`users.js` + `login.js`** — accounts + an ASCII login screen that runs
+  before the shell. `index.html` boots engine → `createLogin` → `bootShell(user)`.
+  Each account is namespaced by its own storage keys (the `default` account keeps
+  the legacy `acii.fs.v1` / `acii.shell.v2`). Passwords are salted+hashed — a
+  **toy hash, not real security**; treat it as such.
 
 ### The app contract
 
@@ -90,6 +96,8 @@ const user   = globalThis.__aciiUser   ||= createUser();
 ```
 
 Every app that touches files / drafts / settings must reuse the one instance.
+Boot pre-creates the FS singleton with the active account's key
+(`users.fsKey(user)`) before importing apps, so `||=` adopts the per-user FS.
 
 ### Pure-logic modules
 

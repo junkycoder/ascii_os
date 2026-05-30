@@ -37,15 +37,18 @@ src/drafts.js    draft / auto-backup store (last unsaved edit per path)
 src/user.js      system user + preferences (vimEnabled, quicklook, …)
 src/keymap.js    global leader-key scheme + Quick-Look routing (pure logic)
 src/fs.js        virtual FS (in-memory + localStorage + File System Access mounts)
+src/users.js     account store + session (localStorage); per-user storage keys
+src/login.js     ASCII login screen (createLogin) — runs before the shell boots
 src/ui-menu.js   context / dropdown menu (createContextMenu)
 src/media.js     imageToAscii, createVideoPlayer, createAudio
 src/music.js     createMusicPlayer (virtual-FS audio + open internet radio)
 src/mobile.js    Capacitor native integration, browser-safe (no-op in browser)
 src/shell.js     desktop shell — wires engine+wm+apps, icons, taskbar, widgets,
-                 wallpaper, context menus, file drop, keymap, input routing
+                 wallpaper, context menus, file drop, keymap, input routing;
+                 user chip + logout menu (opts.user / opts.onLogout / opts.storageKey)
 src/apps/*.js    apps: terminal, snake, notes, paint, readme, findman,
                  mediamogul (Media House), gamemaker
-index.html       boots the shell (dynamic imports with ?v= cache-bust)
+index.html       boots engine → login → shell (dynamic imports with ?v= cache-bust)
 bench.html       standalone perf benchmark
 worker/index.js  Cloudflare Worker entry (serves ASSETS; /api/* lands here later)
 wrangler.jsonc   Cloudflare config (assets from repo root, no build)
@@ -67,6 +70,17 @@ wrangler.jsonc   Cloudflare config (assets from repo root, no build)
   - `const fs = globalThis.__aciiFS ||= createFS({ storageKey: 'acii.fs.v1' });`
   - `const drafts = globalThis.__aciiDrafts ||= createDrafts();`
   - `const user = globalThis.__aciiUser ||= createUser();`
+  **Boot pre-creates the FS singleton with the active account's key**
+  (`users.fsKey(user)`) BEFORE importing apps, so the `||=` adopts the per-user
+  FS. The hardcoded `acii.fs.v1` key is the fallback.
+- **Users / login:** `index.html` boots engine → `createLogin` → (on login)
+  `bootShell(user)`. The built-in `default` account keeps the LEGACY keys
+  (`acii.fs.v1` / `acii.shell.v2`); other accounts are namespaced by id
+  (`…::<id>`). Logout = `users.clearSession()` + `location.reload()` (a session
+  in localStorage skips login on the next load). Passwords are salted + hashed
+  in `users.js` — a TOY hash, not real security. New-user / delete flows use
+  `window.prompt`/`confirm` (preview headless can't run these; they work in a
+  real browser, same as the shell's rename / new-file menus).
 - **Open-a-file handoff:** shell sets `globalThis.__aciiOpenFile = path` then
   focuses the target app; the app picks it up on first render and clears it.
 - **Colors:** read `ctx.theme.peek().colors.{accent,fg,fgDim,error,warning,success,link,border,borderFocus,bg}`.

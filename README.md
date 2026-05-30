@@ -70,7 +70,7 @@ UI kit      Panel Button Input TextArea List Menu Tabs ProgressBar Spinner Dialo
 Editing     vim engine (modal) · syntax highlighter · drafts/auto-backup · markdown
 FS          virtual tree + localStorage + File System Access mounts
 Media       image→ASCII · video→ASCII player · Web Audio · music player (disk + radio)
-System      system user + preferences · keymap (leader + Quick-Look)
+System      accounts + ASCII login · system user + preferences · keymap (leader + Quick-Look)
 Engine      cell buffer · DOM diff renderer · 30fps loop · kbd/mouse/touch · theming
 Signals     signal / computed / effect / batch  (tiny reactive core)
 Native      Capacitor iOS wrapper (dev-time only — adds no runtime deps)
@@ -88,6 +88,8 @@ Native      Capacitor iOS wrapper (dev-time only — adds no runtime deps)
 | `src/vim.js`       | reusable modal vim editing engine over a text buffer (pure logic) |
 | `src/drafts.js`    | draft / auto-backup store (last unsaved edit per file) |
 | `src/user.js`      | system user + preferences (vim on/off, Quick-Look, …) |
+| `src/users.js`     | account store + session (salted-hash, per-user storage keys) |
+| `src/login.js`     | ASCII login screen (`createLogin`) — runs before the shell boots |
 | `src/keymap.js`    | global leader-key scheme + Quick-Look routing (pure logic) |
 | `src/fs.js`        | virtual filesystem |
 | `src/ui-menu.js`   | context / dropdown menu (`createContextMenu`) |
@@ -152,6 +154,10 @@ shell, sized for phone / tablet via the engine's responsive `mode`.
 
 Everything lives on a virtual "disk" and survives reloads:
 
+- **Accounts** — an ASCII login screen runs before the shell. Each account gets
+  its own namespaced FS + desktop; the built-in `default` keeps the legacy keys.
+  Passwords are salted+hashed (a toy hash — not real security). Switch user /
+  log out from the taskbar user chip.
 - **FS** — virtual tree at `/desktop`, `/docs`, `/apps`, `/games`, persisted to
   `localStorage` (binary as base64). Mount a real folder with Findman's
   `+ mount local…` (Chromium; File System Access API).
