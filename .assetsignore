@@ -25,6 +25,12 @@ CLAUDE.md
 HANDOFF.md
 CAPACITOR.md
 
+# Secrets — must never be served as a public asset.
+.env
+.env.*
+.dev.vars
+.dev.vars.*
+
 # OS / editor cruft
 .DS_Store
 *.log
