@@ -64,7 +64,7 @@ replaceOnce(
 //     module no-ops when Capacitor is absent. Inserted right before the frame
 //     loop wiring so `engine` and `shell` already exist.
 replaceOnce(
-  /(\n\s*engine\.onFrame\(\(\) => shell\.render\(\)\);)/,
+  /(\n[ \t]*(?:const \w+ = )?engine\.onFrame\(\(\) => shell\.render\(\)\);)/,
   "\n    // mobile: native Capacitor integration (no-op in a plain browser)\n" +
   "    import('./src/mobile.js' + V)\n" +
   "      .then((m) => m.initMobile && m.initMobile(engine, shell))\n" +

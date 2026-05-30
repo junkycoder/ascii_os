@@ -47,11 +47,25 @@ moduly; Capacitor je jen nativní obal navíc.
 package.json                 # @capacitor/{core,cli,ios} + plugins, npm scripts
 capacitor.config.json        # appId cz.fakan.os, appName, webDir: "www"
 tools/build-www.mjs          # assembling skript: kopíruje web → www/ + mobil
+tools/ios-postsync.mjs       # po cap sync/copy: status bar + nainstaluje ikonu/splash
+tools/gen-app-assets.sh      # generátor ikony + splash masterů (ImageMagick, dev-time)
+assets/ios/                  # (commitnuto) icon-1024.png + splash-2732.png — brand mastery
 src/mobile.js                # browser-safe Capacitor integrace (no-op v prohlížeči)
 www/                         # (generováno, .gitignore) statický web pro cap copy
 ios/                         # (generováno přes `npx cap add ios`, .gitignore)
-.gitignore                   # + node_modules, www, ios
+.gitignore                   # + node_modules, www, /ios (root-anchored, ne assets/ios)
 ```
+
+### 3.0 Ikona + splash (`assets/ios/`, `tools/gen-app-assets.sh`)
+- Brand: zářící zelený `>` terminálový prompt + blokový kurzor na téměř černém
+  poli (accent `#00ff88`, bg `#0d0d0d` / splash černá), Menlo font.
+- `tools/gen-app-assets.sh` přegeneruje `assets/ios/icon-1024.png` (1024², bez
+  alfa — iOS to u AppIcon vyžaduje) a `assets/ios/splash-2732.png` (2732²,
+  značka + wordmark `fakan.os` v safe zóně). Vyžaduje `magick` (dev-time, ne
+  runtime dep).
+- `ios-postsync.mjs` mastery nakopíruje do `ios/` asset katalogu (ten je
+  `.gitignore` a `cap add ios` ho regeneruje na default placeholdery). Mastery
+  jsou committed source of truth.
 
 ### 3.1 `package.json`
 - `name: cz-fakan-os`, `private`, `type: module`.
