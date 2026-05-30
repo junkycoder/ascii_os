@@ -71,11 +71,11 @@ const PATTERNS = {
   blank:  null,
 };
 
-// Icon dimensions: a roomy tile (5-row box + up to 2 centered label rows).
-const ICON_W = 10;
-const ICON_BOX_H = 5;          // bordered box height (top + 3 interior + bottom)
+// Icon dimensions: a tight tile (3-row box hugging the glyph + up to 2 label rows).
+const ICON_W = 8;
+const ICON_BOX_H = 3;          // bordered box height (top + 1 interior + bottom)
 const ICON_H = ICON_BOX_H + 1; // box + 1 baseline label row (hit-test height)
-const ICON_LAYOUT_V = 3;       // bump when icon size changes → drop stale positions
+const ICON_LAYOUT_V = 4;       // bump when icon size changes → drop stale positions
 
 // Built-in widgets — pinned panels on the desktop. Each renders into a
 // sub-context. Spec: { defaultSize: {w, h}, render(ctx, widget) }.
