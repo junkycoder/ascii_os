@@ -67,7 +67,7 @@ function drawBar(ctx, x, y, w, frac, c) {
   }
 }
 
-const STORAGE_KEY = 'acii.shell.v2';
+const DEFAULT_SHELL_KEY = 'acii.shell.v2';
 
 const PATTERNS = {
   dots:   { ch: '·', spacing: 4 },
@@ -299,6 +299,12 @@ const WIDGETS = {
 export function createShell(engine, opts = {}) {
   const apps = opts.apps || [];
   const persist = opts.persist !== false;
+  // Per-user persistence + identity. The boot flow passes the active account's
+  // shell storage key (so each user keeps a separate desktop) plus the account
+  // itself and an onLogout callback for the taskbar user menu.
+  const STORAGE_KEY = opts.storageKey || DEFAULT_SHELL_KEY;
+  const user = opts.user || null;
+  const onLogout = typeof opts.onLogout === 'function' ? opts.onLogout : null;
   const taskbarPos = signal(opts.taskbarPosition || 'bottom'); // bottom|top|hidden
   const backgroundKind = signal(opts.background || 'dots');
   // Currently selected desktop file (for Quick-Look: spacebar previews it).
@@ -931,11 +937,33 @@ export function createShell(engine, opts = {}) {
     const mm = String(now.getMinutes()).padStart(2, '0');
     const clock = ` ${hh}:${mm} `;
     engine.text(cols - clock.length, y, clock, { fg: t.colors.fg, bg: t.colors.bg });
+
+    // User chip (just left of the clock). Click → user menu (switch / log out).
+    if (user) {
+      const chip = userChipText();
+      const ux = userChipX();
+      engine.text(ux, y, chip, { fg: t.colors.bg, bg: t.colors[user.color] || t.colors.accent, bold: true });
+    }
+  }
+
+  function userChipText() {
+    if (!user) return '';
+    const name = String(user.name || 'user').slice(0, 12);
+    return ` ${user.glyph || '☺'} ${name} `;
+  }
+  function userChipX() {
+    const cols = engine.cols.peek();
+    const clockLen = ' 00:00 '.length;
+    return cols - clockLen - userChipText().length;
   }
 
   function taskbarHitTest(px, py) {
     const y = taskbarY();
     if (y < 0 || py !== y) return null;
+    if (user) {
+      const ux = userChipX();
+      if (px >= ux && px < ux + userChipText().length) return { kind: 'user' };
+    }
     let cur = ' acii_os '.length + 1;
     for (const r of running.values()) {
       const chip = wm.isMinimized(r.win.id)
@@ -1113,6 +1141,21 @@ export function createShell(engine, opts = {}) {
     });
   }
 
+  function menuForUser() {
+    const x = userChipX();
+    const y = taskbarY();
+    return createContextMenu({
+      x, y,
+      items: [
+        { label: `${user.glyph || '☺'} ${user.name || 'user'}`, disabled: true },
+        { type: 'separator' },
+        { label: 'Switch user…', onSelect: () => onLogout && onLogout(), hotkey: 'U' },
+        { label: 'Log out',      onSelect: () => onLogout && onLogout(), danger: true, hotkey: 'L' },
+      ],
+      onClose: () => { activeMenu.value = null; },
+    });
+  }
+
   // Decide which menu to show for a right-click / longpress at (x, y).
   function openContextMenuAt(x, y) {
     // priority: widget close × → file icon → app icon → widget → desktop
@@ -1239,6 +1282,7 @@ export function createShell(engine, opts = {}) {
 
     if (e.type === 'mousedown' && e.button === 0) {
       const hit = taskbarHitTest(e.x, e.y);
+      if (hit?.kind === 'user') { activeMenu.value = menuForUser(); return; }
       if (hit?.kind === 'chip') { wm.toggleMinimize(hit.win.id); return; }
       // Start desktop drag only if NOT inside a window (WM handles its own drag)
       if (!pointInAnyWindow(e.x, e.y)) {
@@ -1383,6 +1427,7 @@ export function createShell(engine, opts = {}) {
     }
     if (e.type === 'tap') {
       const hit = taskbarHitTest(e.x, e.y);
+      if (hit?.kind === 'user') { activeMenu.value = menuForUser(); return; }
       if (hit?.kind === 'chip') { wm.toggleMinimize(hit.win.id); return; }
     }
     const f = wm.focused.peek();

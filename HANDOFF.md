@@ -95,6 +95,13 @@ From the user's last feature message (verbatim intent):
    **system user** that owns settings/drafts. Provide: **temp backup** and
    **last unsaved/unfinished items** restore. vim becomes a per-user preference
    (default off).
+   - **DONE (accounts + login):** `src/users.js` (account store + session,
+     salted-hash passwords, per-user storage keys — `default` keeps legacy keys)
+     and `src/login.js` (ASCII login screen: pick user, password, create/delete).
+     `index.html` boots engine → login → shell; the shell shows a user chip in
+     the taskbar with a Switch-user / Log-out menu. Each account gets its own
+     FS + desktop namespace. **Still TODO here:** temp backup / unsaved-restore,
+     and surfacing `user.prefs` (e.g. vim toggle) in the apps.
 
 7. **Global editing UX.** "Edit with spacebar" globally (Quick-Look-style:
    spacebar on a selected file opens/previews it), plus **general macOS/Windows

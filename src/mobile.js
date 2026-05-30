@@ -21,6 +21,13 @@ export function initMobile(engine, shell) {
   const Cap = globalThis.Capacitor;
   const P = (Cap && Cap.Plugins) || {};
 
+  // ── Mark the document as running natively so index.html's iOS-only CSS
+  //    (minimum top/bottom safe-area inset) activates. On the web this class
+  //    is never set, so the grid keeps using the bare env() insets (0 on
+  //    desktop). Setting it before the resize kicks below ensures the first
+  //    reflow already measures the enforced inset.
+  try { document.documentElement.classList.add('cap-native'); } catch (_) {}
+
   // ── Splash: we set launchAutoHide:false so the boot screen shows through;
   //    hide once the web app is up.
   try { P.SplashScreen && P.SplashScreen.hide(); } catch (_) {}
