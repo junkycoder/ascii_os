@@ -20,6 +20,7 @@ import { createFS } from '../fs.js';
 import { createDrafts } from '../drafts.js';
 import { createVim } from '../vim.js';
 import { createUser } from '../user.js';
+import { langForPath, highlight, roleColor } from '../syntax.js';
 
 const SAVE_FLASH_MS = 1000;
 
@@ -94,6 +95,28 @@ export function createApp(initialCtx, win) {
   let editorCol = 0;
   let editorScrollY = 0;
   let editorDirty = false;
+
+  // Syntax-highlight cache: re-tokenize only when the buffer text or language
+  // changes. rows = Array<Array<{text, role}>> (one entry per source line).
+  let hlCache = { text: null, lang: null, rows: null };
+  function highlightRows(text, lang) {
+    if (!lang) return null;
+    if (hlCache.text === text && hlCache.lang === lang) return hlCache.rows;
+    const rows = highlight(text, lang);
+    hlCache = { text, lang, rows };
+    return rows;
+  }
+  // Draw a pre-tokenized line as colored spans, clipped to maxW columns.
+  function drawSpans(ctx, x, y, spans, maxW, colors, bg) {
+    let col = 0;
+    for (const sp of spans) {
+      if (col >= maxW) break;
+      let t = sp.text;
+      if (col + t.length > maxW) t = t.slice(0, maxW - col);
+      if (t.length) ctx.text(x + col, y, t, { fg: roleColor(sp.role, colors), bg });
+      col += sp.text.length;
+    }
+  }
 
   // A short transient notice shown in the status bar (e.g. "draft restored").
   let notice = '';
@@ -629,6 +652,10 @@ export function createApp(initialCtx, win) {
     const curRow = vim ? vim.cursor.y : editorRow;
     const curCol = vim ? vim.cursor.x : editorCol;
 
+    // Syntax highlighting by file extension (cached; re-tokenized on change).
+    const lang = langForPath(editorPath);
+    const hlRows = lang ? highlightRows(lines.join('\n'), lang) : null;
+
     if (curRow < editorScrollY) editorScrollY = curRow;
     else if (curRow >= editorScrollY + innerH) editorScrollY = curRow - innerH + 1;
     if (editorScrollY < 0) editorScrollY = 0;
@@ -646,7 +673,11 @@ export function createApp(initialCtx, win) {
         truncated = true;
       }
       if (visible.length > 0) {
-        ctx.text(innerX, innerY + i, visible, { fg: C.fg, bg: C.bg });
+        if (hlRows && hlRows[li]) {
+          drawSpans(ctx, innerX, innerY + i, hlRows[li], maxLineWidth, C, C.bg);
+        } else {
+          ctx.text(innerX, innerY + i, visible, { fg: C.fg, bg: C.bg });
+        }
       }
       // Visual-mode selection highlight.
       if (sel) {
