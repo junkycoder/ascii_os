@@ -940,17 +940,16 @@ export function createShell(engine, opts = {}) {
     // ── Active context menu intercepts mouse events ────────────
     const am = activeMenu.peek();
     if (am) {
-      // Outside-click closes (left + right). Inside-click is forwarded.
+      // Forward to the menu, which owns hit-testing for itself AND any open
+      // submenu (drawn outside the parent's bounds). It returns true when it
+      // consumed the event; a false means the click was truly outside the
+      // whole chain, so we close and let it fall through.
       if (e.type === 'mousedown' || e.type === 'click') {
-        const b = am.bounds;
-        const inside = b && e.x >= b.x && e.x < b.x + b.w && e.y >= b.y && e.y < b.y + b.h;
-        if (!inside) {
-          activeMenu.value = null;
-          // Allow the click to fall through to whatever's underneath
-        } else {
-          try { am.onMouse?.(e); } catch {}
-          return;
-        }
+        let handled = false;
+        try { handled = !!am.onMouse?.(e); } catch {}
+        if (handled) return;
+        activeMenu.value = null;
+        // fall through to whatever's underneath
       } else if (e.type === 'mousemove') {
         try { am.onMouse?.(e); } catch {}
         return;

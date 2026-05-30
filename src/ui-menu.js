@@ -115,16 +115,14 @@ export function createContextMenu(opts) {
       y: sy,
       items: it.items,
       maxWidth: maxW,
-      onClose: () => { activeSubmenu = null; activeParentIdx = -1; },
+      // The submenu calls its own onClose(reason) on activation. Bubble a
+      // "select" up so picking a submenu item closes the whole chain.
+      onClose: (reason) => {
+        activeSubmenu = null;
+        activeParentIdx = -1;
+        if (reason === "select") close("select");
+      },
     });
-    // Bubble selections up — when the submenu activates something we close
-    // the whole chain so callers don't have to chase nested onClose calls.
-    const wrap = activeSubmenu;
-    const innerClose = wrap.close;
-    wrap.close = (reason) => {
-      innerClose(reason);
-      if (reason === "select") close("select");
-    };
   }
 
   function activate(idx, engine) {
