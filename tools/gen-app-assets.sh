@@ -40,7 +40,7 @@ magick -size 2732x2732 xc:none \
 magick "$tmp/smark.png" -blur 0x16 -channel A -evaluate multiply 0.7 +channel "$tmp/sglow.png"
 magick -size 2732x2732 xc:none \
   -font "$MENLO" -fill '#d8d8d8' -gravity center \
-  -pointsize 120 -annotate +0+170 'Fakan OS' \
+  -pointsize 120 -annotate +0+170 'FakanOS' \
   "$tmp/sword.png"
 magick -size 2732x2732 xc:'#000000' \
   "$tmp/sglow.png" -compose over -composite \

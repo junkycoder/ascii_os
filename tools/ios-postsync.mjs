@@ -70,9 +70,23 @@ function setBool(key, value) {
   log(`set ${key} = ${v}`);
 }
 
+// Set a string key, adding it if missing.
+function setString(key, value) {
+  try {
+    execFileSync(PB, ['-c', `Set :${key} ${value}`, PLIST], { stdio: 'pipe' });
+  } catch (_) {
+    execFileSync(PB, ['-c', `Add :${key} string ${value}`, PLIST], { stdio: 'pipe' });
+  }
+  log(`set ${key} = ${value}`);
+}
+
 // Status bar hidden from launch; opt out of per-view-controller appearance so
 // the Info.plist value actually wins.
 setBool('UIStatusBarHidden', true);
 setBool('UIViewControllerBasedStatusBarAppearance', false);
+
+// Home-screen label. The cap template ships CFBundleDisplayName = appName from
+// the time of `cap add ios`; pin it here so renames survive regeneration.
+setString('CFBundleDisplayName', 'FakanOS');
 
 log('done →', PLIST);
