@@ -1,0 +1,27 @@
+{
+  // acii_os on Cloudflare Workers. Static ASCII shell served from the repo root
+  // via the ASSETS binding; the worker entry (worker/index.js) is where the
+  // D1 database + /api/* routes will land later. Account: junkycoder.
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "acii-os",
+  "main": "worker/index.js",
+  "compatibility_date": "2026-05-30",
+  "account_id": "1fb320ef69377e04c649dcc880044f71",
+  "assets": {
+    // Serve the repo root verbatim — no build step. .assetsignore strips the
+    // non-web cruft (node_modules, docs, native wrapper, worker source, …).
+    "directory": ".",
+    "binding": "ASSETS"
+  },
+
+  // Custom domain — fakan.cz zone must live on the junkycoder account.
+  // custom_domain:true makes Cloudflare manage the DNS record + TLS cert.
+  "routes": [
+    { "pattern": "os.fakan.cz", "custom_domain": true }
+  ]
+
+  // ── DB (later) ──────────────────────────────────────────────────────────
+  // "d1_databases": [
+  //   { "binding": "DB", "database_name": "acii-os", "database_id": "<id>" }
+  // ]
+}
