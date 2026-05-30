@@ -41,17 +41,19 @@ export function createWindowManager(engine, opts = {}) {
     const w = signal(Math.max(MIN_W, spec.w ?? 30));
     const h = signal(Math.max(MIN_H, spec.h ?? 10));
     const maximized = signal(!!spec.maximized);
+    const minimized = signal(!!spec.minimized);
     // Saved geometry for restore-after-maximize.
     let savedGeom = null;
 
     const win = {
       id,
-      title, x, y, w, h, maximized,
+      title, x, y, w, h, maximized, minimized,
       body: spec.body || (() => {}),
       onClose: spec.onClose || null,
       resizable: spec.resizable !== false,
       closable: spec.closable !== false,
       maximizable: spec.maximizable !== false,
+      minimizable: spec.minimizable !== false,
       focusable: spec.focusable !== false,
 
       // computed lazily below so we can reference `win`
@@ -61,6 +63,8 @@ export function createWindowManager(engine, opts = {}) {
       setTitle(s) { title.value = String(s); },
       focus() { bringToFront(win); },
       toggleMaximize() { toggleMaximize(win); },
+      minimize() { minimize(win); },
+      restore() { restoreWindow(win); },
     };
 
     win.focused = computed(() => focused.value === win);
@@ -89,7 +93,7 @@ export function createWindowManager(engine, opts = {}) {
     const list = windows.peek().slice();
     list.push(win);
     windows.value = list;
-    if (win.focusable) focused.value = win;
+    if (win.focusable && !win.minimized.peek()) focused.value = win;
 
     return win;
   }
@@ -101,8 +105,9 @@ export function createWindowManager(engine, opts = {}) {
     const list = windows.peek().filter((w) => w !== win);
     windows.value = list;
     if (focused.peek() === win) {
-      // Refocus next-top focusable window if any.
-      const next = [...list].reverse().find((w) => w.focusable) || null;
+      // Refocus next-top focusable, non-minimized window if any.
+      const next = [...list].reverse()
+        .find((w) => w.focusable && !w.minimized.peek()) || null;
       focused.value = next;
     }
   }
@@ -116,6 +121,8 @@ export function createWindowManager(engine, opts = {}) {
   function bringToFront(target) {
     const win = resolveWin(target);
     if (!win) return;
+    // Bringing a window forward implicitly un-minimizes it.
+    if (win.minimized.peek()) win.minimized.value = false;
     const list = windows.peek();
     if (list[list.length - 1] === win) {
       // Already top — just make sure focus is set.
@@ -128,11 +135,52 @@ export function createWindowManager(engine, opts = {}) {
     if (win.focusable) focused.value = win;
   }
 
+  // ── Minimize / restore ───────────────────────────────────────────
+  // Minimize hides a window without destroying state: it's skipped by render,
+  // hit-testing and focus cycling, but remains in `windows` so the taskbar can
+  // still list it and offer a restore. Restore un-hides + raises + focuses.
+  function minimize(target) {
+    const win = resolveWin(target);
+    if (!win || !win.minimizable) return;
+    if (win.minimized.peek()) return;
+    win.minimized.value = true;
+    // If it was focused, hand focus to the next visible focusable window.
+    if (focused.peek() === win) {
+      const next = [...windows.peek()].reverse()
+        .find((w) => w.focusable && !w.minimized.peek()) || null;
+      focused.value = next;
+    }
+  }
+
+  function restoreWindow(target) {
+    const win = resolveWin(target);
+    if (!win) return;
+    // bringToFront clears the minimized flag and raises + focuses.
+    bringToFront(win);
+  }
+
+  function isMinimized(target) {
+    const win = resolveWin(target);
+    return !!(win && win.minimized.peek());
+  }
+
+  // Taskbar chip toggle: minimize a visible/focused window, restore a hidden
+  // one. A visible-but-unfocused window is raised+focused first (one click to
+  // foreground, a second to minimize), matching common desktop behaviour.
+  function toggleMinimize(target) {
+    const win = resolveWin(target);
+    if (!win) return;
+    if (win.minimized.peek()) { restoreWindow(win); return; }
+    if (focused.peek() === win) { minimize(win); return; }
+    bringToFront(win);
+  }
+
   function focusNext() { cycleFocus(1); }
   function focusPrev() { cycleFocus(-1); }
 
   function cycleFocus(dir) {
-    const list = windows.peek().filter((w) => w.focusable);
+    // Alt+Tab skips minimized windows entirely.
+    const list = windows.peek().filter((w) => w.focusable && !w.minimized.peek());
     if (list.length === 0) { focused.value = null; return; }
     const cur = focused.peek();
     let idx = cur ? list.indexOf(cur) : -1;
@@ -157,7 +205,7 @@ export function createWindowManager(engine, opts = {}) {
   effect(() => {
     const c = engine.cols.value, r = engine.rows.value;
     for (const win of windows.peek()) {
-      if (win.maximized.peek()) {
+      if (win.maximized.peek() && !win.minimized.peek()) {
         win.x.value = 0; win.y.value = 0;
         win.w.value = c; win.h.value = r;
       }
@@ -172,6 +220,8 @@ export function createWindowManager(engine, opts = {}) {
     // Iterate top-down so the visually-on-top window wins.
     for (let i = list.length - 1; i >= 0; i--) {
       const win = list[i];
+      // Minimized windows are not on the desktop — they can't be hit.
+      if (win.minimized.peek()) continue;
       const wx = win.x.peek(), wy = win.y.peek();
       const ww = win.w.peek(), wh = win.h.peek();
       if (px < wx || py < wy || px >= wx + ww || py >= wy + wh) continue;
@@ -230,8 +280,8 @@ export function createWindowManager(engine, opts = {}) {
 
   function visibleButtons(win) {
     // Order matters for layout (left → right): minimize, maximize, close.
-    // We don't currently support minimize but reserve the slot if you add it.
     const out = [];
+    if (win.minimizable) out.push('min');
     if (win.maximizable) out.push('max');
     if (win.closable) out.push('close');
     return out;
@@ -253,6 +303,7 @@ export function createWindowManager(engine, opts = {}) {
         // Buttons activate on mousedown (immediate, terminal-style).
         if (hit.btn === 'close') hit.win.close();
         else if (hit.btn === 'max') toggleMaximize(hit.win);
+        else if (hit.btn === 'min') minimize(hit.win);
         return;
       }
 
@@ -351,6 +402,7 @@ export function createWindowManager(engine, opts = {}) {
       if (hit.zone === 'btn') {
         if (hit.btn === 'close') hit.win.close();
         else if (hit.btn === 'max') toggleMaximize(hit.win);
+        else if (hit.btn === 'min') minimize(hit.win);
       }
       return;
     }
@@ -413,7 +465,11 @@ export function createWindowManager(engine, opts = {}) {
     const f = focused.peek();
     // Draw bottom-to-top so the focused window (which we always position at
     // the end of the array on focus) sits visually on top.
-    for (const win of list) drawWindow(win, win === f);
+    // Minimized windows are hidden — kept in state for the taskbar only.
+    for (const win of list) {
+      if (win.minimized.peek()) continue;
+      drawWindow(win, win === f);
+    }
   }
 
   function drawWindow(win, isFocused) {
@@ -521,6 +577,10 @@ export function createWindowManager(engine, opts = {}) {
     focusNext,
     focusPrev,
     toggleMaximize,
+    minimize,
+    restore: restoreWindow,
+    toggleMinimize,
+    isMinimized,
 
     // State (signals)
     focused,
