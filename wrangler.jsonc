@@ -6,6 +6,8 @@
   "name": "acii-os",
   "main": "worker/index.js",
   "compatibility_date": "2026-05-30",
+  // Keep the *.workers.dev fallback URL alive alongside the custom domain.
+  "workers_dev": true,
   "account_id": "1fb320ef69377e04c649dcc880044f71",
   "assets": {
     // Serve the repo root verbatim — no build step. .assetsignore strips the
