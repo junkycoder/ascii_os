@@ -60,6 +60,28 @@ export function initMobile(engine, shell = null) {
     setTimeout(kick, 600);
   } catch (_) {}
 
+  // ── Magic-link deeplink: a universal link (https://os.fakan.cz/auth?token=…)
+  //    or the custom scheme (fakanos://auth?token=…) opens the app here. Pull
+  //    the token out and hand it to the boot flow's sign-in handler. If the app
+  //    is cold-starting, the handler may not exist yet → stash it; index.html
+  //    drains __aciiPendingAuthToken once startLogin() wires the handler.
+  try {
+    const handleUrl = (url) => {
+      if (!url) return;
+      let tok = null;
+      try { tok = new URL(url).searchParams.get('token'); } catch (_) {}
+      if (!tok) return;
+      if (typeof globalThis.__aciiHandleAuthToken === 'function') globalThis.__aciiHandleAuthToken(tok);
+      else globalThis.__aciiPendingAuthToken = tok;
+    };
+    if (P.App && P.App.getLaunchUrl) {
+      P.App.getLaunchUrl().then((r) => handleUrl(r && r.url)).catch(() => {});
+    }
+    if (P.App && P.App.addListener) {
+      P.App.addListener('appUrlOpen', (ev) => handleUrl(ev && ev.url));
+    }
+  } catch (_) {}
+
   // ── Hardware/back gesture (iOS has none, but App plugin still fires on
   //    Android and the swipe-back edge): close the focused window instead of
   //    backgrounding the app, if there is one.

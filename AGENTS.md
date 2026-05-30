@@ -66,11 +66,15 @@ signals → engine → { fs, user, drafts, themes } → { wm, ui, ui-menu, markd
   (clock / stats / note / music), wallpaper, context menus, file drop, the
   global keymap, and **input routing to the focused app**. This is the
   integration hub.
-- **`users.js` + `login.js`** — accounts + an ASCII login screen that runs
-  before the shell. `index.html` boots engine → `createLogin` → `bootShell(user)`.
-  Each account is namespaced by its own storage keys (the `default` account keeps
-  the legacy `acii.fs.v1` / `acii.shell.v2`). Passwords are salted+hashed — a
-  **toy hash, not real security**; treat it as such.
+- **`auth.js` + `login.js`** — email + magic-link sign-in (replaces the old
+  local `users.js` account store). `index.html` boots engine → `createLogin` →
+  (on token) `bootShell(user)`. `login.js` takes email + username and POSTs
+  `/api/auth/request`; the worker emails a one-time link; opening it (web, or
+  iOS universal link → `mobile.js` → `__aciiHandleAuthToken`) →
+  `/api/auth/verify` → a long-lived session in `localStorage` (`acii.session.v3`).
+  Each account is namespaced by its server user id (`acii.fs.v1::<id>`).
+  **Backend** = `worker/index.js` + Cloudflare KV (`AUTH`) + Resend; the python
+  devserver can't run it — use `wrangler dev` or deploy to exercise auth.
 
 ### The app contract
 

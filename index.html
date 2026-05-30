@@ -26,15 +26,16 @@
       env(safe-area-inset-bottom)
       env(safe-area-inset-left);
   }
-  /* Native iOS only (class set by src/mobile.js). With the status bar HIDDEN,
-     iOS reports a smaller safe-area-inset-top, so the grid would slide under
-     the Dynamic Island / notch. Reserve a minimum top inset so the top row
-     (hint banner, window title bars) clears the island — as if the status bar
-     were still there, just without the clock. Desktop stays untouched (no
-     class → plain env() above, which is 0). */
+  /* Native iOS only (class set by src/mobile.js). Full-bleed: the grid extends
+     all the way to the top and bottom physical edges — no top/bottom inset at
+     all. Maximizes content height; the trade-off is that the top row (hint
+     banner / window title bars) can sit partly under the Dynamic Island / notch
+     and the bottom row under the home indicator. Left/right keep the env()
+     insets from the base rule above (landscape notch). Desktop stays untouched
+     (no class → plain env() above, which is 0). */
   html.cap-native #app {
-    padding-top: max(env(safe-area-inset-top), 48px);
-    padding-bottom: max(env(safe-area-inset-bottom), 8px);
+    padding-top: 0;
+    padding-bottom: 0;
   }
 
   .acii-root {
@@ -95,12 +96,12 @@
     // singleton is in place before any app module evaluates its `||=` line.
     const [
       { createEngine, signal, effect, themes },
-      users,
+      auth,
       { createLogin },
       { createFS },
     ] = await Promise.all([
       import('./src/engine.js' + V),
-      import('./src/users.js' + V),
+      import('./src/auth.js' + V),
       import('./src/login.js' + V),
       import('./src/fs.js' + V),
     ]);
@@ -164,13 +165,13 @@
 
     window.engine = engine;
     window.themes = themes;
-    window.users = users;
+    window.auth = auth;
 
     // ── Boot the desktop shell for a logged-in user ─────────────────
     async function bootShell(user) {
       // Seed the per-user FS singleton BEFORE importing shell/apps so their
       // `globalThis.__aciiFS ||= createFS(...)` lines adopt this instance.
-      globalThis.__aciiFS = createFS({ storageKey: users.fsKey(user) });
+      globalThis.__aciiFS = createFS({ storageKey: auth.fsKey(user) });
 
       const [
         { createShell },
@@ -212,9 +213,9 @@
         apps: appRegistry,
         background: 'dots',
         taskbarPosition: 'bottom',
-        storageKey: users.shellKey(user),
+        storageKey: auth.shellKey(user),
         user,
-        onLogout: () => { users.clearSession(); location.reload(); },
+        onLogout: () => { auth.clearSession(); location.reload(); },
       });
 
       const offFrame = engine.onFrame(() => shell.render());
@@ -228,20 +229,41 @@
     }
 
     // ── Login → shell handoff ───────────────────────────────────────
+    // One login instance owns the email/magic-link flow. A magic-link token can
+    // arrive three ways: typed-in flow already on this screen, a web link
+    // landing on /auth?token=… (this tab), or an iOS universal link / deeplink
+    // (mobile.js → __aciiHandleAuthToken). All funnel through login.signIn().
     function startLogin() {
       const login = createLogin(engine, {
         onLogin: async (user) => {
           login.destroy();      // stop login render + input
+          auth.cleanUrl();
           await bootShell(user);
         },
       });
       window.login = login;
+      globalThis.__aciiHandleAuthToken = (tok) => login.signIn(tok);
+      // A deeplink may have fired before the handler existed (iOS cold start).
+      if (globalThis.__aciiPendingAuthToken) {
+        const t = globalThis.__aciiPendingAuthToken;
+        globalThis.__aciiPendingAuthToken = null;
+        login.signIn(t);
+      }
+      return login;
     }
 
-    // Stay logged in across reloads; show the login screen otherwise.
-    const session = users.getSession();
-    if (session) {
+    // Boot priority: a magic-link token in the URL wins; otherwise a remembered
+    // session boots the shell straight away (revalidated in the background);
+    // otherwise show the login form.
+    const urlToken = auth.tokenFromUrl();
+    const session = auth.getSession();
+    if (urlToken) {
+      const login = startLogin();
+      await login.signIn(urlToken);   // verify → onLogin → bootShell (or surfaces an error)
+    } else if (session) {
       await bootShell(session.user);
+      // Long-remember: only sign out if the server explicitly rejects the token.
+      auth.refresh().then((s) => { if (!s) location.reload(); }).catch(() => {});
     } else {
       startLogin();
     }

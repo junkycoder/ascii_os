@@ -37,8 +37,9 @@ src/drafts.js    draft / auto-backup store (last unsaved edit per path)
 src/user.js      system user + preferences (vimEnabled, quicklook, …)
 src/keymap.js    global leader-key scheme + Quick-Look routing (pure logic)
 src/fs.js        virtual FS (in-memory + localStorage + File System Access mounts)
-src/users.js     account store + session (localStorage); per-user storage keys
-src/login.js     ASCII login screen (createLogin) — runs before the shell boots
+src/auth.js      email + magic-link sign-in, session, per-user storage keys
+                 (client side of worker /api/auth/*); replaces the old users.js
+src/login.js     ASCII login screen (createLogin) — email+username, magic link
 src/ui-menu.js   context / dropdown menu (createContextMenu)
 src/media.js     imageToAscii, createVideoPlayer, createAudio
 src/music.js     createMusicPlayer (virtual-FS audio + open internet radio)
@@ -71,16 +72,21 @@ wrangler.jsonc   Cloudflare config (assets from repo root, no build)
   - `const drafts = globalThis.__aciiDrafts ||= createDrafts();`
   - `const user = globalThis.__aciiUser ||= createUser();`
   **Boot pre-creates the FS singleton with the active account's key**
-  (`users.fsKey(user)`) BEFORE importing apps, so the `||=` adopts the per-user
-  FS. The hardcoded `acii.fs.v1` key is the fallback.
-- **Users / login:** `index.html` boots engine → `createLogin` → (on login)
-  `bootShell(user)`. The built-in `default` account keeps the LEGACY keys
-  (`acii.fs.v1` / `acii.shell.v2`); other accounts are namespaced by id
-  (`…::<id>`). Logout = `users.clearSession()` + `location.reload()` (a session
-  in localStorage skips login on the next load). Passwords are salted + hashed
-  in `users.js` — a TOY hash, not real security. New-user / delete flows use
-  `window.prompt`/`confirm` (preview headless can't run these; they work in a
-  real browser, same as the shell's rename / new-file menus).
+  (`auth.fsKey(user)`) BEFORE importing apps, so the `||=` adopts the per-user
+  FS. Every account is namespaced by its server user id (`acii.fs.v1::<id>`).
+- **Auth / login (email + magic link):** `index.html` boots engine →
+  `createLogin` → (on token) `bootShell(user)`. `login.js` collects email +
+  username and POSTs `/api/auth/request`; the worker emails a one-time link
+  (`os.fakan.cz/auth?token=…`). Opening it (web tab, or iOS universal link →
+  `mobile.js` → `__aciiHandleAuthToken`) calls `login.signIn(token)` →
+  `/api/auth/verify` → a long-lived session token in `localStorage`
+  (`acii.session.v3`). Boot reads the cached session and shows the shell
+  immediately, revalidating via `/api/auth/me` in the background (offline →
+  keep trusting the cache; 401 → reload to login). Logout =
+  `auth.clearSession()` + `location.reload()`. **Backend** = `worker/index.js`
+  + Cloudflare KV (binding `AUTH`) + Resend; needs the `RESEND_API_KEY` secret
+  and a verified `fakan.cz` sender. The python devserver can't run the worker —
+  exercise auth via `wrangler dev` or a `trunk` deploy.
 - **Open-a-file handoff:** shell sets `globalThis.__aciiOpenFile = path` then
   focuses the target app; the app picks it up on first render and clears it.
 - **Colors:** read `ctx.theme.peek().colors.{accent,fg,fgDim,error,warning,success,link,border,borderFocus,bg}`.

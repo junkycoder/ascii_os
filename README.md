@@ -88,8 +88,8 @@ Native      Capacitor iOS wrapper (dev-time only — adds no runtime deps)
 | `src/vim.js`       | reusable modal vim editing engine over a text buffer (pure logic) |
 | `src/drafts.js`    | draft / auto-backup store (last unsaved edit per file) |
 | `src/user.js`      | system user + preferences (vim on/off, Quick-Look, …) |
-| `src/users.js`     | account store + session (salted-hash, per-user storage keys) |
-| `src/login.js`     | ASCII login screen (`createLogin`) — runs before the shell boots |
+| `src/auth.js`      | email + magic-link sign-in, session, per-user storage keys |
+| `src/login.js`     | ASCII login screen (`createLogin`) — email + username, magic link |
 | `src/keymap.js`    | global leader-key scheme + Quick-Look routing (pure logic) |
 | `src/fs.js`        | virtual filesystem |
 | `src/ui-menu.js`   | context / dropdown menu (`createContextMenu`) |
@@ -154,10 +154,11 @@ shell, sized for phone / tablet via the engine's responsive `mode`.
 
 Everything lives on a virtual "disk" and survives reloads:
 
-- **Accounts** — an ASCII login screen runs before the shell. Each account gets
-  its own namespaced FS + desktop; the built-in `default` keeps the legacy keys.
-  Passwords are salted+hashed (a toy hash — not real security). Switch user /
-  log out from the taskbar user chip.
+- **Accounts** — sign in with your email: an ASCII login screen takes an email
+  + username and the edge worker emails a one-time **magic link** (no passwords).
+  Opening the link (web, or the iOS app via a universal link) starts a
+  long-remembered session. Each account gets its own namespaced FS + desktop.
+  Log out from the taskbar user chip. (Backend: Cloudflare KV + Resend.)
 - **FS** — virtual tree at `/desktop`, `/docs`, `/apps`, `/games`, persisted to
   `localStorage` (binary as base64). Mount a real folder with Findman's
   `+ mount local…` (Chromium; File System Access API).
