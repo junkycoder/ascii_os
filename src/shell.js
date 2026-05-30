@@ -261,8 +261,13 @@ export function createShell(engine, opts = {}) {
   // File icon positions: filename → { x, y }
   const fileIconPos = new Map();
 
+  // Multi-selection of desktop files (set of '/desktop/<name>' paths) for bulk
+  // actions. `selectedFile` (above) stays the single lead / Quick-Look target.
+  const selectedFiles = new Set();
+
   // Drag state for icons / widgets (separate from WM's window drag).
   // shape: { kind: 'icon'|'widget'|'file', target, ox, oy, baseX, baseY, moved }
+  //   or marquee: { kind:'marquee', x0, y0, x1, y1, base:Set, moved }
   let deskDrag = null;
 
   // ── Persistence ─────────────────────────────────────────────────
@@ -642,16 +647,21 @@ export function createShell(engine, opts = {}) {
 
     files.forEach((f, i) => {
       const { x, y } = fileIcon(f.name, i);
+      const path = '/desktop/' + f.name;
       const isDragging = deskDrag?.kind === 'file' && deskDrag.target === f.name;
-      const isWallpaper = wallpaperPath.peek() === '/desktop/' + f.name;
+      const isWallpaper = wallpaperPath.peek() === path;
+      const isSelected = selectedFiles.has(path);
       const fg = isDragging ? c.borderFocus
+              : isSelected ? c.accent
               : isWallpaper ? c.warning
               : c.accentDim;
-      const glyphFg = isWallpaper ? c.warning : c.fg;
-      // File tiles are outline-only (no face fill) to read lighter than apps.
-      drawIconTile(x, y, extGlyph(f.name), fg, glyphFg, c.bg);
+      const glyphFg = isWallpaper ? c.warning : (isSelected ? c.accent : c.fg);
+      // Selected tiles get a theme-tinted face; others stay outline-only so they
+      // read lighter than app icons.
+      const faceBg = isSelected ? c.border : c.bg;
+      drawIconTile(x, y, extGlyph(f.name), fg, glyphFg, faceBg);
       // Filename centered under the tile (wraps for two-part names).
-      drawIconLabel(x, y + ICON_BOX_H, f.name, c.fg);
+      drawIconLabel(x, y + ICON_BOX_H, f.name, isSelected ? c.accent : c.fg);
     });
   }
 
@@ -664,6 +674,74 @@ export function createShell(engine, opts = {}) {
       }
     }
     return null;
+  }
+
+  // ── Desktop file selection (single + multi for bulk actions) ────
+  function leadFile() {
+    return selectedFiles.size ? [...selectedFiles][selectedFiles.size - 1] : null;
+  }
+  function clearFileSelection() {
+    if (!selectedFiles.size && !selectedFile.peek()) return;
+    selectedFiles.clear();
+    selectedFile.value = null;
+  }
+  function selectSingleFile(path) {
+    selectedFiles.clear();
+    selectedFiles.add(path);
+    selectedFile.value = path;
+  }
+  function toggleFileSelection(path) {
+    if (selectedFiles.has(path)) selectedFiles.delete(path);
+    else selectedFiles.add(path);
+    selectedFile.value = leadFile();
+  }
+  function selectAllDesktopFiles() {
+    selectedFiles.clear();
+    for (const f of listDesktopFiles()) selectedFiles.add('/desktop/' + f.name);
+    selectedFile.value = leadFile();
+  }
+  function deleteSelectedFiles() {
+    const paths = [...selectedFiles].filter(p => fs.exists(p));
+    if (!paths.length) return;
+    const msg = paths.length === 1
+      ? 'Smazat ' + paths[0] + ' ?'
+      : 'Smazat ' + paths.length + ' položek?';
+    if (!window.confirm(msg)) return;
+    for (const p of paths) {
+      if (wallpaperPath.peek() === p) clearWallpaper();
+      try { fs.delete(p); } catch {}
+      fileIconPos.delete(p.slice('/desktop/'.length));
+    }
+    clearFileSelection();
+    bumpSave();
+  }
+
+  // Recompute the marquee's covered files. `m.base` is the selection snapshot
+  // at drag start (so an additive Cmd-drag adds to what was already selected).
+  function updateMarqueeSelection(m) {
+    const lx = Math.min(m.x0, m.x1), rx = Math.max(m.x0, m.x1);
+    const ty = Math.min(m.y0, m.y1), by = Math.max(m.y0, m.y1);
+    const next = new Set(m.base || []);
+    listDesktopFiles().forEach((f, i) => {
+      const { x, y } = fileIcon(f.name, i);
+      // Rectangle intersection of the icon's hit box with the marquee.
+      if (x < rx && x + ICON_W > lx && y < by && y + ICON_H > ty) {
+        next.add('/desktop/' + f.name);
+      }
+    });
+    selectedFiles.clear();
+    for (const p of next) selectedFiles.add(p);
+    selectedFile.value = leadFile();
+  }
+
+  function renderMarquee() {
+    if (!deskDrag || deskDrag.kind !== 'marquee' || !deskDrag.moved) return;
+    const c = engine.theme.peek().colors;
+    const lx = Math.min(deskDrag.x0, deskDrag.x1), rx = Math.max(deskDrag.x0, deskDrag.x1);
+    const ty = Math.min(deskDrag.y0, deskDrag.y1), by = Math.max(deskDrag.y0, deskDrag.y1);
+    const w = rx - lx + 1, h = by - ty + 1;
+    if (w < 2 || h < 2) return;
+    engine.box(lx, ty, w, h, { fg: c.borderFocus, glyphSet: 'borderRound' });
   }
 
   // ── Widgets ─────────────────────────────────────────────────────
@@ -881,6 +959,16 @@ export function createShell(engine, opts = {}) {
   function menuForFile(file, x, y) {
     const path = '/desktop/' + file.name;
     const isWp = wallpaperPath.peek() === path;
+    const multi = selectedFiles.size > 1 && selectedFiles.has(path);
+    const deleteItem = multi
+      ? { label: `Delete ${selectedFiles.size} items`, onSelect: deleteSelectedFiles, danger: true, hotkey: 'D' }
+      : { label: 'Delete', onSelect: () => {
+            if (isWp) clearWallpaper();
+            fs.delete(path);
+            fileIconPos.delete(file.name);
+            selectedFiles.delete(path);
+            if (selectedFile.peek() === path) selectedFile.value = leadFile();
+          }, danger: true, hotkey: 'D' };
     return createContextMenu({
       x, y,
       items: [
@@ -888,18 +976,14 @@ export function createShell(engine, opts = {}) {
         { label: isWp ? 'Remove wallpaper' : 'Set as wallpaper',
           onSelect: () => isWp ? clearWallpaper() : setWallpaper(path), hotkey: 'W' },
         { type: 'separator' },
-        { label: 'Rename…',        onSelect: () => {
+        { label: 'Rename…',        disabled: multi, onSelect: () => {
             const next = window.prompt('Nový název:', file.name);
             if (next && next !== file.name && !fs.exists('/desktop/' + next)) {
               fs.move(path, '/desktop/' + next);
               if (isWp) wallpaperPath.value = '/desktop/' + next;
             }
           } },
-        { label: 'Delete',         onSelect: () => {
-            if (isWp) clearWallpaper();
-            fs.delete(path);
-            fileIconPos.delete(file.name);
-          }, danger: true, hotkey: 'D' },
+        deleteItem,
       ],
       onClose: () => { activeMenu.value = null; },
     });
@@ -970,7 +1054,14 @@ export function createShell(engine, opts = {}) {
   function openContextMenuAt(x, y) {
     // priority: widget close × → file icon → app icon → widget → desktop
     const file = fileIconHitTest(x, y);
-    if (file) { activeMenu.value = menuForFile(file, x, y); return; }
+    if (file) {
+      // Right-clicking a file that isn't selected selects it (single); a file
+      // already in a multi-selection keeps the group so bulk actions apply.
+      const path = '/desktop/' + file.name;
+      if (!selectedFiles.has(path)) selectSingleFile(path);
+      activeMenu.value = menuForFile(file, x, y);
+      return;
+    }
     const app = iconHitTest(x, y);
     if (app)  { activeMenu.value = menuForApp(app, x, y); return; }
     const w = widgetHitTest(x, y);
@@ -1033,6 +1124,12 @@ export function createShell(engine, opts = {}) {
     // ── Drag in progress: track move/up first ─────────────────
     if (deskDrag) {
       if (e.type === 'mousemove') {
+        if (deskDrag.kind === 'marquee') {
+          deskDrag.x1 = e.x; deskDrag.y1 = e.y;
+          if (e.x !== deskDrag.x0 || e.y !== deskDrag.y0) deskDrag.moved = true;
+          updateMarqueeSelection(deskDrag);
+          return;
+        }
         const nx = deskDrag.baseX + (e.x - deskDrag.ox);
         const ny = deskDrag.baseY + (e.y - deskDrag.oy);
         if (deskDrag.kind === 'icon') {
@@ -1040,8 +1137,16 @@ export function createShell(engine, opts = {}) {
           iconPositions.set(deskDrag.target, { x, y });
           if (nx !== deskDrag.baseX || ny !== deskDrag.baseY) deskDrag.moved = true;
         } else if (deskDrag.kind === 'file') {
-          const { x, y } = clampPos(nx, ny, ICON_W, ICON_H);
-          fileIconPos.set(deskDrag.target, { x, y });
+          if (deskDrag.group) {
+            const dx = e.x - deskDrag.ox, dy = e.y - deskDrag.oy;
+            for (const g of deskDrag.group) {
+              const { x, y } = clampPos(g.baseX + dx, g.baseY + dy, ICON_W, ICON_H);
+              fileIconPos.set(g.name, { x, y });
+            }
+          } else {
+            const { x, y } = clampPos(nx, ny, ICON_W, ICON_H);
+            fileIconPos.set(deskDrag.target, { x, y });
+          }
           if (nx !== deskDrag.baseX || ny !== deskDrag.baseY) deskDrag.moved = true;
         } else if (deskDrag.kind === 'widget') {
           const w = widgets.peek().find(x => x.id === deskDrag.target);
@@ -1055,6 +1160,7 @@ export function createShell(engine, opts = {}) {
         return;
       }
       if (e.type === 'mouseup') {
+        if (deskDrag.kind === 'marquee') { deskDrag = null; return; }
         if (deskDrag.moved) bumpSave();
         deskDrag = null;
         return;
@@ -1089,20 +1195,46 @@ export function createShell(engine, opts = {}) {
           deskDrag = { kind: 'widget', target: widget.id, ox: e.x, oy: e.y, baseX: widget.x, baseY: widget.y, moved: false };
           return;
         }
+        const additive = !!(e.raw && (e.raw.metaKey || e.raw.ctrlKey || e.raw.shiftKey));
         const file = fileIconHitTest(e.x, e.y);
         if (file) {
-          selectedFile.value = '/desktop/' + file.name;  // Quick-Look target
+          const path = '/desktop/' + file.name;
+          if (additive) {
+            // Cmd/Ctrl/Shift+click toggles a file in the selection (no drag).
+            toggleFileSelection(path);
+            return;
+          }
+          // Plain click: select just this file unless it's already part of a
+          // multi-selection (so the existing group stays put).
+          if (!selectedFiles.has(path)) selectSingleFile(path);
+          else selectedFile.value = path;
           const pos = fileIcon(file.name);
-          deskDrag = { kind: 'file', target: file.name, ox: e.x, oy: e.y, baseX: pos.x, baseY: pos.y, moved: false };
+          // Dragging a file that's part of a multi-selection moves the whole
+          // group; snapshot each member's base position up front.
+          let group = null;
+          if (selectedFiles.size > 1 && selectedFiles.has(path)) {
+            group = [];
+            for (const sp of selectedFiles) {
+              const nm = sp.slice('/desktop/'.length);
+              const gp = fileIcon(nm);
+              group.push({ name: nm, baseX: gp.x, baseY: gp.y });
+            }
+          }
+          deskDrag = { kind: 'file', target: file.name, ox: e.x, oy: e.y, baseX: pos.x, baseY: pos.y, moved: false, group };
           return;
         }
-        selectedFile.value = null;  // click on empty desktop / app icon clears selection
         const app = iconHitTest(e.x, e.y);
         if (app) {
+          clearFileSelection();
           const pos = iconPos(app.id);
           deskDrag = { kind: 'icon', target: app.id, ox: e.x, oy: e.y, baseX: pos.x, baseY: pos.y, moved: false };
           return;
         }
+        // Empty desktop: begin a rubber-band marquee. Additive keeps what was
+        // already selected; a plain drag replaces the selection.
+        if (!additive) clearFileSelection();
+        deskDrag = { kind: 'marquee', x0: e.x, y0: e.y, x1: e.x, y1: e.y, base: new Set(selectedFiles), moved: false };
+        return;
       }
     }
 
@@ -1256,6 +1388,28 @@ export function createShell(engine, opts = {}) {
       }
     }
 
+    // ── Desktop file selection shortcuts (only when no window is focused, so
+    // they never clobber an app's own keys) ────────────────────────
+    if (!wm.focused.peek()) {
+      // Select all desktop files.
+      if ((e.ctrl || e.meta) && keyIs(e, 'a') && !e.alt) {
+        e.raw?.preventDefault?.();
+        selectAllDesktopFiles();
+        return;
+      }
+      // Clear the selection.
+      if (e.key === 'Escape' && selectedFiles.size) {
+        clearFileSelection();
+        return;
+      }
+      // Bulk-delete the selection.
+      if ((e.key === 'Delete' || e.key === 'Backspace') && !e.ctrl && !e.meta && !e.alt && selectedFiles.size) {
+        e.raw?.preventDefault?.();
+        deleteSelectedFiles();
+        return;
+      }
+    }
+
     // Cycle theme: Ctrl/Cmd+T
     if ((e.ctrl || e.meta) && keyIs(e, 't') && !e.alt) {
       e.raw?.preventDefault?.();
@@ -1343,6 +1497,7 @@ export function createShell(engine, opts = {}) {
     renderWidgets();        // pinned widgets — under icons/windows
     renderIcons();
     renderFileIcons();      // /desktop/* files
+    renderMarquee();        // rubber-band selection box over the desktop
     renderHint();           // BEFORE wm so windows occlude it
     wm.render();
     renderTaskbar();

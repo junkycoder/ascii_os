@@ -7,8 +7,9 @@
   "scripts": {
     "dev": "python3 .claude/devserver.py 8765 0.0.0.0",
     "build": "node tools/build-www.mjs",
-    "copy": "npm run build && npx cap copy ios",
-    "sync": "npm run build && npx cap sync ios",
+    "copy": "npm run build && npx cap copy ios && node tools/ios-postsync.mjs",
+    "sync": "npm run build && npx cap sync ios && node tools/ios-postsync.mjs",
+    "ios:postsync": "node tools/ios-postsync.mjs",
     "ios:add": "npx cap add ios",
     "ios:open": "npx cap open ios"
   },
