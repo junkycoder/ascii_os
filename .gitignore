@@ -1,0 +1,10 @@
+# acii_os — no build step, zero deps, nothing to ignore from tooling.
+# These are just defensive entries for editor / OS cruft.
+
+.DS_Store
+*.log
+node_modules/
+.vscode/
+.idea/
+*.swp
+*~
