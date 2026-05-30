@@ -106,6 +106,7 @@ export function createApp(initialCtx, win) {
   let playerSrc = null;
   let lastFrame = null;
   let playerW = 0, playerH = 0;
+  let videoMuted = false;   // play .mp4 with sound by default (M toggles)
 
   // Audio: a media.js audio context + music handle.
   let audio = null;
@@ -357,6 +358,7 @@ export function createApp(initialCtx, win) {
     try {
       player = createVideoPlayer({
         src: playerSrc, width: W, height: H, color: 'rgb', fps: 15,
+        muted: videoMuted, volume: 1,
       });
     } catch (err) {
       loadError = 'video failed: ' + (err && err.message || err);
@@ -681,6 +683,10 @@ export function createApp(initialCtx, win) {
       { label: playing ? '[ pause ]' : '[ play ]', action: 'toggle', hot: true },
       { label: '[ stop ]', action: 'stop' },
     ];
+    // Mute toggle only makes sense for video (audio uses its own controls).
+    if (loadedKind === 'video') {
+      buttons.push({ label: videoMuted ? '[ ♪off ]' : '[ ♪on ]', action: 'mute' });
+    }
     let col = x;
     for (const b of buttons) {
       if (col >= x + w) break;
@@ -785,6 +791,12 @@ export function createApp(initialCtx, win) {
       if (k === 'ArrowRight') { seekBy(+5); return; }
       if (k === 'ArrowUp') { focus = 'tree'; return; }
       if (e.code === 'KeyS') { stopPlayback(); return; }
+      if (e.code === 'KeyM') {                       // mute / unmute video
+        videoMuted = !videoMuted;
+        if (player && player.setMuted) player.setMuted(videoMuted);
+        setStatus(videoMuted ? 'muted' : 'sound on', 1200);
+        return;
+      }
     },
 
     onMouse(e) {
@@ -813,6 +825,11 @@ export function createApp(initialCtx, win) {
           if (e.y === z.y && e.x >= z.x0 && e.x <= z.x1) {
             if (z.action === 'toggle') togglePlay();
             else if (z.action === 'stop') stopPlayback();
+            else if (z.action === 'mute') {
+              videoMuted = !videoMuted;
+              if (player && player.setMuted) player.setMuted(videoMuted);
+              setStatus(videoMuted ? 'muted' : 'sound on', 1200);
+            }
             return;
           }
         }

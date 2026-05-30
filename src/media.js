@@ -108,7 +108,8 @@ function loadImage(src) {
 // receive the same { cells } shape as imageToAscii so renderers can be
 // shared. Caller is responsible for calling destroy() when done.
 export function createVideoPlayer(opts) {
-  const { src, width, height, charset, color = "mono", fps = 15 } = opts;
+  const { src, width, height, charset, color = "mono", fps = 15,
+          muted = true, volume = 1 } = opts;
   if (!src) throw new Error("createVideoPlayer: src required");
   if (!width || !height) {
     throw new Error("createVideoPlayer: width and height required");
@@ -118,7 +119,11 @@ export function createVideoPlayer(opts) {
   const video = document.createElement("video");
   video.crossOrigin = "anonymous";
   video.playsInline = true;
-  video.muted = true; // muted-autoplay is browser-friendly
+  // muted defaults to true so unattended autoplay is browser-friendly; pass
+  // muted:false (e.g. Media House) to hear audio — works once the user has
+  // interacted with the page (clicking a file / the play control counts).
+  video.muted = !!muted;
+  video.volume = Math.max(0, Math.min(1, volume));
   video.loop = false;
   video.preload = "auto";
   video.src = src;
@@ -166,6 +171,9 @@ export function createVideoPlayer(opts) {
       stopSampling();
     },
     seek(t) { video.currentTime = t; },
+    setMuted(m) { video.muted = !!m; },
+    isMuted() { return video.muted; },
+    setVolume(v) { video.volume = Math.max(0, Math.min(1, v)); },
     currentTime,
     duration,
     playing,
