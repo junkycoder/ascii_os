@@ -182,6 +182,7 @@
         { createApp: createFindman },
         { createApp: createMediaMogul },
         { createApp: createGameMaker },
+        { createApp: createTimetrack },
       ] = await Promise.all([
         import('./src/shell.js' + V),
         import('./src/apps/terminal.js' + V),
@@ -192,6 +193,7 @@
         import('./src/apps/findman.js' + V),
         import('./src/apps/mediamogul.js' + V),
         import('./src/apps/gamemaker.js' + V),
+        import('./src/apps/timetrack.js' + V),
       ]);
 
       const appRegistry = [
@@ -202,6 +204,7 @@
         { id: 'paint',     label: 'Paint',     icon: '[✎]', factory: createPaint },
         { id: 'mediamogul',label: 'Media House',icon: '[▶]', factory: createMediaMogul },
         { id: 'gamemaker', label: 'GameMaker', icon: '[♛]', factory: createGameMaker },
+        { id: 'timetrack', label: 'Time',      icon: '[◷]', factory: createTimetrack },
         { id: 'snake',     label: 'Snake',     icon: '[●]', factory: createSnake },
       ];
 
