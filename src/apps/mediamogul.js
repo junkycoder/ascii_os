@@ -1,8 +1,9 @@
-// mediamogul.js — "Media Mogul", a READ-ONLY media browser for acii_os.
+// mediamogul.js — "Media House", a READ-ONLY media browser for acii_os.
 //
 // Replaces the old Video app. Left pane: a Findman-style tree of the virtual
-// FS, filtered to media files only (video / image / audio). Right pane: the
-// ASCII rendering of the selected item plus a link to the original file path.
+// FS, filtered to media files only (video / image / audio), with a "+ mount
+// local…" row to attach an OS folder. Right pane: the ASCII rendering of the
+// selected item plus a link to the original file path.
 //
 // Reuses media.js:
 //   imageToAscii      — images → static ASCII frame
@@ -188,6 +189,11 @@ export function createApp(initialCtx, win) {
       }
     }
     walk('/', 0);
+    // Always offer a "mount local…" action row at the bottom so the user can
+    // attach an OS folder and browse its media.
+    if (!fs.canMountLocal || fs.canMountLocal()) {
+      out.push({ path: '__mount__', name: '+ mount local…', type: 'mount', depth: 0 });
+    }
     visibleRows = out;
     // Default selection: first media file if nothing selected yet.
     if (selectedPath == null && out.length) {
@@ -230,9 +236,19 @@ export function createApp(initialCtx, win) {
     const i = indexOfSelected();
     return i < 0 ? null : visibleRows[i];
   }
+  function doMount() {
+    if (fs.canMountLocal && !fs.canMountLocal()) {
+      loadError = 'Local folder mount is not supported in this browser';
+      return;
+    }
+    Promise.resolve(fs.mountLocal({ at: '/mnt/local' }))
+      .then(() => { expanded.add('/mnt'); expanded.add('/mnt/local'); rebuildVisibleRows(); })
+      .catch((e) => { loadError = 'Mount cancelled: ' + (e && e.message || e); });
+  }
   function activateSelection() {
     const r = selectedRow();
     if (!r) return;
+    if (r.type === 'mount') { doMount(); return; }
     if (r.type === 'dir') {
       if (expanded.has(r.path)) expanded.delete(r.path);
       else expanded.add(r.path);
@@ -245,6 +261,7 @@ export function createApp(initialCtx, win) {
   function expandOrPreview() {
     const r = selectedRow();
     if (!r) return;
+    if (r.type === 'mount') { doMount(); return; }
     if (r.type === 'dir' && !expanded.has(r.path)) {
       expanded.add(r.path);
       rebuildVisibleRows();
@@ -301,7 +318,7 @@ export function createApp(initialCtx, win) {
     loadError = null;
     loadedPath = path;
     loadedKind = kind;
-    win.setTitle?.('Media Mogul · ' + basename(path));
+    win.setTitle?.('Media House · ' + basename(path));
 
     if (kind === 'image') {
       // Defer the actual decode to render, where we know the pane size.
