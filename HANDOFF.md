@@ -1,125 +1,110 @@
 # HANDOFF — acii_os
 
-Session handoff. Context was running low; this captures everything needed to
-continue cleanly.
+Running log of what works and what's still open. Pair with `CLAUDE.md` /
+`AGENTS.md` (project rules + conventions) and `README.md` (the map).
 
 ## Where things stand (DONE & working)
 
 Verified functional end-to-end:
+
 - **Engine** — cell buffer + DOM diff renderer, 30fps loop with hidden-tab
   setTimeout fallback, kbd/mouse/touch, `subContext`, responsive `mode` signal
   (watch/mobile/tablet/desktop/tv), `onContextMenu`, `onFileDrop`, `onDragOver`.
 - **Themes** — default-dark / default-light / crt-green / amber-terminal;
   switching is instant (theme is a signal).
 - **Window manager** — open/close/focus, drag, resize, maximize/restore
-  (`▣`/`□` glyph), Alt+Tab cycle, double-click title to (un)maximize, close `×`
-  hit-test fixed for maximized windows.
-- **UI kit** (`ui.js`) — 10 components. Mostly unused by apps so far but present.
+  (`▣`/`□`), **minimize/restore** (`Ctrl/Cmd+M`, restore via taskbar/refocus),
+  Alt+Tab cycle, double-click title to (un)maximize, close `×` hit-test fixed
+  for maximized windows.
+- **UI kit** (`ui.js`) — components present; apps mostly draw directly.
 - **Markdown** (`markdown.js`) — hidden markup, headers, bold, links, lists,
-  code blocks. Used by README app.
+  code blocks. Used by README app + Findman markdown preview.
+- **Syntax** (`syntax.js`) — pure highlighter for js/json/css/html/py/sh/md →
+  role spans mapped to theme colors. Used by Findman's editor.
 - **FS** (`fs.js`) — virtual tree in `Map<path,…>`, localStorage persistence
   (debounced, base64 for binary), `changes` signal + `subscribe(path,fn)`,
-  `mountLocal()` via File System Access API. Seeds `/desktop`, `/docs/README.md`,
-  `/docs/CHANGELOG.md`, `/apps`, `/games` on first run.
+  `mountLocal({at})` via File System Access API. Seeds `/desktop`,
+  `/docs/README.md`, `/docs/CHANGELOG.md`, `/apps`, `/games` on first run.
+- **System user** (`user.js`) — single system user owns settings/preferences
+  (`vimEnabled`, `quicklook`, …) persisted to `acii.user.v1`. Shared singleton
+  `globalThis.__aciiUser`.
+- **Drafts** (`drafts.js`) — last unsaved edit per path, debounced to
+  localStorage; restored on reopen, cleared on real save. Shared singleton
+  `globalThis.__aciiDrafts`.
 - **Media** (`media.js`) — `imageToAscii`, `createVideoPlayer` (off-DOM video →
-  canvas sample → ASCII cells), `createAudio` (beep / loadSound / loadMusic).
+  canvas sample → ASCII cells), `createAudio`.
+- **Music** (`music.js`) — `createMusicPlayer(fs)`: plays virtual-FS audio +
+  open internet radio (SomaFM). Drives the `music` desktop widget.
+- **Vim** (`vim.js`) — reusable modal engine (normal/insert/visual, hjkl/w/b/
+  0/$/gg/G, i/a/o, x/dd/yy/p, `:w` `:q`). Pure logic; opt-in per user pref.
 - **Context menu** (`ui-menu.js`) — popup with submenus, auto-flip at edges,
   keyboard + mouse. Wired into shell for icons / files / widgets / desktop.
-- **Shell** — desktop with patterned background, app icons (4-row boxes,
-  draggable, persisted), **desktop file icons from `/desktop`**, taskbar with
-  running-app chips + clock, **pinnable widgets** (clock / stats / note, drag,
-  close ×), **wallpaper** (a paint file set as background via right-click),
-  **file drop** (OS file → `/desktop`), context menus everywhere, input routing
-  to the focused app.
+- **Shell** — patterned-background desktop, draggable persisted app icons,
+  desktop file icons from `/desktop`, **marquee + keyboard multi-select** for
+  bulk file actions, taskbar with running-app chips + clock, pinnable widgets
+  (clock / stats / note / **music**, drag, close ×), wallpaper (a paint file set
+  as background), OS file drop → `/desktop`, context menus everywhere, input
+  routing to the focused app, **Quick-Look** (spacebar previews the selected
+  desktop file when no window is focused).
 - **Apps:**
-  - terminal — fake shell, 11 builtins, history, scrollback
-  - snake — arrows/WASD/vim HJKL, best score persisted
-  - notes — multi-line editor, localStorage
-  - readme — markdown viewer
-  - paint — **tools: pen / line / rect / circle / text**, live preview, bold
+  - **terminal** — fake shell, builtins (`help echo ls cat clear/cls uname date
+    whoami fortune cowsay banner history`), history, scrollback.
+  - **snake** — arrows/WASD/vim HJKL, best score persisted.
+  - **notes** — multi-line editor, localStorage.
+  - **readme** — markdown viewer (opens on first run).
+  - **paint** — tools pen / line / rect / circle / text, live preview, bold
     toggle, color/brush pickers, saves to `/desktop/painting-N.acii`. File
-    format `# acii-paint v1 WxH` then rows of `<char><colorChar><styleChar>`
-    (e.g. `Ha1` = 'H', accent, bold). Backward compatible with old `a0` tags.
-  - finder — file tree + text editor, `Ctrl+S`, `+ mount local…`, picks up
-    `__aciiOpenFile`
-  - video — ASCII player; now also accepts an FS path (`/desktop/clip.mp4`) and
-    picks up `__aciiOpenFile`, blob-loads bytes from FS. **Still prompts for a
-    URL** (to be replaced — see backlog).
-  - gamemaker — grid editor + play mode (player/wall/goal/enemy), persisted
+    format `# acii-paint v1 WxH` then rows of `<char><colorChar><styleChar>`.
+  - **findman** (label **"Findman Dick"**, Feynman pun) — file tree + text
+    editor, `Ctrl+S` save, `+ mount local…`, picks up `__aciiOpenFile`.
+    **Drafts auto-backup**, **opt-in vim** (`F9` toggles `user.prefs.vimEnabled`),
+    syntax highlighting, markdown preview, multi-select bulk actions.
+  - **mediamogul** (label **"Media House"**) — read-only media browser: a
+    Findman-style tree filtered to video/image/audio + ASCII rendering of the
+    selection + link to the original. No URL prompt, no editing.
+  - **gamemaker** — grid editor + play mode (player/wall/goal/enemy), persisted.
 
 ### File-type routing (shell `openFile`)
-`.acii`→paint, video exts→video, text exts→finder, default→finder.
-Double-click a desktop file icon or pick "Open" in its context menu.
+`.acii`→paint, video/image/audio exts→Media House, text exts→Findman,
+default→Findman. Double-click a desktop file icon, pick "Open" in its context
+menu, or spacebar (Quick-Look) on the selection.
 
-## Recently fixed bugs
-- Drag no longer text-selects the grid (CSS `user-select:none` + selectstart guard).
-- Clock widget shows ISO `YYYY-MM-DD` (fits w=12).
-- macOS Option+W/X/H shortcuts work (`e.code` match, not `e.key`).
-- Widget close `×`, plus Alt+X / `shell.removeWidget(id)`.
-- Number keys reach focused apps (only launch apps when nothing focused).
-- Wallpaper renderer decodes paint color tags correctly (+ bold).
-- Dev server sends `no-store`; consolidated `wm.mjs`→`wm.js`.
+## Infra / deploy
 
-## BACKLOG — requested, NOT yet done (next session priorities)
+- **Cloudflare Workers** — repo root served verbatim via `ASSETS` (no build);
+  `.assetsignore` strips non-web files. `worker/index.js` is the entry (D1 +
+  `/api/*` to come). Custom domain `os.fakan.cz` + `*.workers.dev` fallback.
+  **Pushes to `trunk` auto-deploy** (`.github/workflows/deploy.yml`, Wrangler
+  4.x pinned). Manual: `npx wrangler deploy`.
+- **iOS (Capacitor)** — `cz.fakan.os`. `src/mobile.js` integrates natively and
+  no-ops in a plain browser; safe-area handled in `index.html`. See `CAPACITOR.md`.
 
-From the user's last feature message (verbatim intent):
+## OPEN / next priorities
 
-1. **Lost unsaved text in Finder.** Editing buffer isn't backed up. Implement a
-   **draft/auto-backup system**: keep the last unsaved edit per file in a temp
-   store (localStorage or a `/.drafts/` FS area) so a reopen/crash restores it.
-   This ties into item 6 ("temp backup + last unsaved unfinished things").
-
-2. **Rename Finder → "Findman Dick"** — pun on **Richard Phillips Feynman**
-   (Dick = Richard). Theme the app around Feynman. (Full name for the about box:
-   *Richard Phillips Feynman*.) Update app id/label/icon and any references.
-
-3. **Findman supports vim** for editing (modal: normal/insert/visual, basic
-   motions hjkl/w/b/0/$/gg/G, i/a/o, x/dd/yy/p, `:w` `:q`). Vim is **opt-in, not
-   default** (see item 6).
-
-4. **Verify the mounted local folder.** User reports mounting a folder shows
-   nothing. `fs.mountLocal()` exists (File System Access API, Chrome-only) but
-   the merged listing / reads through the mount may be broken. NEEDS DEBUGGING
-   with the user driving the OS picker dialog — they'll click through, add a
-   folder, and we inspect `fs.list('/mnt/local')`. Likely the async-list path in
-   finder's tree isn't awaited / rendered.
-
-5. **Replace Video player → "Media Mogul"** (English name). A read-only media
-   browser: a **tree like Findman** but for **video / image / audio** files →
-   shows ASCII rendering + a link to the original. **No URL prompt** (user
-   doesn't know what's supported), **no editing**. Reuse `media.js`
-   (`imageToAscii`, `createVideoPlayer`, `createAudio`) and the finder tree UI.
-
-6. **System user + "disk" model.** Everything lives on the virtual "disk" when
-   no device is mounted; the app remembers across reloads. Add a notion of a
-   **system user** that owns settings/drafts. Provide: **temp backup** and
-   **last unsaved/unfinished items** restore. vim becomes a per-user preference
-   (default off).
-
-7. **Global editing UX.** "Edit with spacebar" globally (Quick-Look-style:
-   spacebar on a selected file opens/previews it), plus **general macOS/Windows
-   conventions behind a prefix key** (a consistent modifier so shortcuts don't
-   collide with app keys). Decide one prefix (e.g. a leader key) and route.
-
-Also still open from earlier:
-- **Window minimize** (`[_]` button → hide window, restore from taskbar chip).
-  The WM reserves the slot but minimize is unimplemented. (Task #8.)
-
-## Suggested approach next session
-- Start with **#4 (mount debugging)** live with the user since it needs the OS
-  dialog — quick win or quick diagnosis.
-- Then **#1/#6 drafts + system-user/disk model** as shared infra (Findman, Media
-  Mogul, vim all build on it).
-- Then **#2/#3 Findman rebrand + vim**, **#5 Media Mogul** (Workflow: one new
-  app file each, reuse finder tree + media.js).
-- **#7 global UX** last — it's cross-cutting; design the prefix-key scheme before
-  wiring.
+1. **Leader-key scheme not wired.** `src/keymap.js` (a full leader + Quick-Look
+   routing module) exists but **nothing imports it**. The shell currently does
+   global shortcuts *directly* (`Ctrl/Cmd+M` minimize, `Ctrl/Cmd+A` select-all,
+   spacebar Quick-Look). To finish backlog item "global editing UX": pick a
+   leader key, route shell `onKey` through `keymap.route()`, and migrate the
+   ad-hoc combos into keymap bindings (so they're discoverable via
+   `km.describe()`).
+2. **Re-verify mounted local folder live.** `fs.mountLocal({at:'/mnt/local-…'})`
+   is wired in Findman (`+ mount local…`, Chromium-only). Needs a user-driven
+   pass through the OS picker to confirm the merged tree lists + reads cleanly;
+   inspect `fs.list('/mnt/local-…')` in the console.
+3. **Media House depth** — confirm video/audio playback + seek inside the grid
+   across themes; large files / unsupported codecs should fail gracefully (no
+   URL prompt by design).
+4. **D1 / `/api/*`** — the worker just serves static assets today; server logic
+   hangs off `worker/index.js` when the DB lands (`wrangler.jsonc` has the
+   commented `d1_databases` block ready).
 
 ## How to run / verify
 ```
 python3 .claude/devserver.py 8765 0.0.0.0    # or the `acii` launch config
 # http://localhost:8765/   ·   LAN: http://<lan-ip>:8765/
 ```
-Verify via DOM (`.acii-row` textContent) through preview_eval; the screenshot
-tool lagged badly this session. Apps are reachable from `window.shell` /
-`window.engine` / `window.shell.fs` in the console.
+No test suite — verify in the browser. Prefer inspecting the live DOM
+(`.acii-row` textContent via preview_eval) over screenshots (the screenshot tool
+has lagged here). `window.engine` / `window.shell` / `window.shell.fs` are
+exposed for console poking.
