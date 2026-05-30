@@ -967,8 +967,19 @@ export function createShell(engine, opts = {}) {
     if (!f) return;
     const wx = f.x.peek(), wy = f.y.peek(), ww = f.w.peek(), wh = f.h.peek();
     const bx = wx + 1, by = wy + 1, bw = ww - 2, bh = wh - 2;
-    if (e.x < bx || e.y < by || e.x >= bx + bw || e.y >= by + bh) return;
     const rec = running.get(f.id);
+    const inside = !(e.x < bx || e.y < by || e.x >= bx + bw || e.y >= by + bh);
+    if (!inside) {
+      // Always deliver mouseup so drag-based apps (paint, gamemaker) can end a
+      // stroke even if the pointer was released outside their content area —
+      // otherwise the brush "sticks" and keeps painting on every move.
+      if (e.type === 'mouseup' && rec?.instance?.onMouse) {
+        const cx = Math.max(0, Math.min(e.x - bx, bw - 1));
+        const cy = Math.max(0, Math.min(e.y - by, bh - 1));
+        try { rec.instance.onMouse({ ...e, x: cx, y: cy }); } catch {}
+      }
+      return;
+    }
     if (rec?.instance?.onMouse) {
       try { rec.instance.onMouse({ ...e, x: e.x - bx, y: e.y - by }); } catch {}
     }
