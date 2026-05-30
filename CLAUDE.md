@@ -19,12 +19,15 @@ src/ui.js        UI kit (Panel/Button/Input/TextArea/List/Menu/Tabs/…)
 src/wm.js        window manager (z-order, drag, resize, maximize, focus chain)
 src/markdown.js  markdown view with hidden markup
 src/fs.js        virtual FS (in-memory + localStorage + File System Access mounts)
+src/users.js     account store + session (localStorage); per-user storage keys
+src/login.js     ASCII login screen (createLogin) — runs before the shell boots
 src/ui-menu.js   context / dropdown menu (createContextMenu)
 src/media.js     imageToAscii, createVideoPlayer, createAudio
 src/shell.js     desktop shell — wires engine+wm+apps, icons, taskbar, widgets,
-                 wallpaper, context menus, file drop, input routing
+                 wallpaper, context menus, file drop, input routing; user chip +
+                 logout menu (opts.user / opts.onLogout / opts.storageKey)
 src/apps/*.js    apps (terminal, snake, notes, paint, readme, finder, video, gamemaker)
-index.html       boots the shell (dynamic imports with ?v= cache-bust)
+index.html       boots engine → login → shell (dynamic imports with ?v= cache-bust)
 bench.html       standalone perf benchmark
 .claude/devserver.py   dev server with Cache-Control: no-store
 .claude/launch.json    preview config (python3 devserver.py 8765 0.0.0.0)
@@ -37,7 +40,17 @@ bench.html       standalone perf benchmark
   shell routes events to the focused app's handlers. Apps DON'T call
   `engine.clear()` / `engine.start()`.
 - **Shared FS singleton:** `const fs = globalThis.__aciiFS ||= createFS({ storageKey: 'acii.fs.v1' })`.
-  Every app that touches files uses this exact line.
+  Every app that touches files uses this exact line. **Boot pre-creates this
+  singleton with the active user's key** (`users.fsKey(user)`) BEFORE importing
+  apps, so the `||=` adopts the per-user FS. The hardcoded key is the fallback.
+- **Users / login:** `index.html` boots engine → `createLogin` → (on login)
+  `bootShell(user)`. The built-in `default` account keeps the LEGACY keys
+  (`acii.fs.v1` / `acii.shell.v2`); other accounts are namespaced by id
+  (`…::<id>`). Logout = `users.clearSession()` + `location.reload()` (a session
+  in localStorage skips login on the next load). Passwords are salted + hashed
+  in `users.js` — a TOY hash, not real security. New-user / delete flows use
+  `window.prompt`/`confirm` (preview headless can't run these; they work in a
+  real browser, same as the shell's rename / new-file menus).
 - **Open-a-file handoff:** shell sets `globalThis.__aciiOpenFile = path` then
   focuses the target app; the app picks it up on first render and clears it.
 - **Colors:** read `ctx.theme.peek().colors.{accent,fg,fgDim,error,warning,success,link,border,borderFocus,bg}`.
