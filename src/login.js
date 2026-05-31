@@ -20,6 +20,8 @@
 // touch handlers can hit-test the same tiles the renderer drew.
 
 import * as auth from './auth.js';
+import { createKeyboard } from './keyboard.js';
+import userPrefs from './user.js';
 
 const FIELD_EMAIL = 0;
 const FIELD_NAME = 1;
@@ -40,6 +42,13 @@ export function createLogin(engine, opts = {}) {
   let done = false;
   let layout = null;
 
+  // On-screen keyboard (touch) — without it there's no way to type the email /
+  // username on a phone. Shown during the 'form' phase whenever the pref is on.
+  const keyboard = createKeyboard();
+  function keyboardEnabled() { try { return !!userPrefs.get('keyboardEnabled'); } catch { return false; } }
+  function keyboardVisible() { return !done && phase === 'form' && keyboardEnabled(); }
+  function keyboardRows() { return keyboardVisible() ? keyboard.layout(engine.cols.peek()).height + 1 : 0; }
+
   // ── layout ──────────────────────────────────────────────────────
   function computeLayout() {
     const cols = engine.cols.peek();
@@ -53,7 +62,8 @@ export function createLogin(engine, opts = {}) {
     const H = innerH + 2;
 
     const px = Math.max(0, Math.floor((cols - W) / 2));
-    const py = Math.max(0, Math.floor((rows - H) / 2));
+    // Lift the panel above the on-screen keyboard so they never overlap.
+    const py = Math.max(0, Math.floor((rows - keyboardRows() - H) / 2));
 
     const x = px + 3;
     const fieldW = W - 6;
@@ -122,6 +132,8 @@ export function createLogin(engine, opts = {}) {
 
     if (error) centerText(L, L.hintY, '✗ ' + error, c.error);
     else centerText(L, L.hintY, 'Tab switch · Enter send · type to edit', c.fgDim);
+
+    renderKeyboard();
   }
 
   // The guest button is shared by the form and the "sent" screen — a no-email,
@@ -172,6 +184,45 @@ export function createLogin(engine, opts = {}) {
   function centerText(L, y, str, fg, bold) {
     const s = str.length > L.W - 2 ? str.slice(0, L.W - 2) : str;
     engine.text(L.px + Math.floor((L.W - s.length) / 2), y, s, { fg, bold });
+  }
+
+  // ── on-screen keyboard (render + tap routing) ───────────────────
+  function renderKeyboard() {
+    if (!keyboardVisible()) return;
+    const cols = engine.cols.peek();
+    const lay = keyboard.layout(cols);
+    const top = engine.rows.peek() - 1 - lay.height; // 1-row comfort gutter below
+    if (top < 0) return;
+    const c = engine.theme.peek().colors;
+    engine.rect(0, top, cols, lay.height, { ch: ' ', bg: c.bg });
+    for (const row of lay.rows) {
+      const ry = top + row.y;
+      for (const key of row.keys) {
+        const on = key.active;
+        const face = on ? c.accent : c.border;
+        const fg = on ? c.bg : c.fg;
+        engine.rect(key.x, ry, key.w, 1, { ch: ' ', bg: face });
+        const label = String(key.label).slice(0, key.w);
+        const lx = key.x + Math.max(0, Math.floor((key.w - label.length) / 2));
+        engine.text(lx, ry, label, { fg, bg: face, bold: on });
+      }
+    }
+  }
+  // A tap/click in the keyboard band → press → feed the synthetic key events
+  // straight into onKey (reuses all the field-editing logic). Returns true when
+  // the event was inside the band (so the caller stops processing it).
+  function handleKeyboardPress(x, y) {
+    if (!keyboardVisible()) return false;
+    const lay = keyboard.layout(engine.cols.peek());
+    const top = engine.rows.peek() - 1 - lay.height;
+    if (top < 0 || y < top || y >= top + lay.height) return false;
+    const id = keyboard.hitTest(x, y - top);
+    if (id) {
+      const intent = keyboard.press(id);
+      if (intent?.kind === 'key') for (const ev of intent.events) onKey(ev);
+      // 'mod' / 'layer' just mutate keyboard state; the next frame re-renders it.
+    }
+    return true; // swallow taps in the band even on a gap between keys
   }
 
   // ── actions ─────────────────────────────────────────────────────
@@ -290,11 +341,13 @@ export function createLogin(engine, opts = {}) {
 
   function onMouse(e) {
     if (done) return;
+    if ((e.type === 'mousedown' || e.type === 'click') && handleKeyboardPress(e.x, e.y)) return;
     if (e.type === 'mousedown' || e.type === 'click') onPointer(e.x, e.y);
   }
 
   function onTouch(e) {
     if (done) return;
+    if (e.type === 'tap' && handleKeyboardPress(e.x, e.y)) return;
     if (e.type === 'tap' || e.type === 'doubletap') onPointer(e.x, e.y);
   }
 
