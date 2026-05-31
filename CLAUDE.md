@@ -54,6 +54,8 @@ src/collab.js    collaborative-desktop client: email invite + presence WS +
                  shared-FS transport over /api/collab/* (createCollabClient)
 src/collabsync.js two-way shared-desktop FS sync (owner /desktop ⇄ /room/<owner>/)
                  via the CollabRoom DO; loop-safe shadow map (createDesktopSync)
+src/pathsafe.js  pure relative-path validator (isSafeRel) shared by the worker +
+                 collabsync/share — rejects ../ traversal on untrusted room paths
 src/apps/*.js    apps: terminal, snake, notes, paint, readme, findman,
                  mediamogul (Media House), gamemaker, share, feedback
 index.html       boots engine → login → shell (dynamic imports with ?v= cache-bust)

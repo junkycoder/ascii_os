@@ -26,6 +26,7 @@ export function createApp(initialCtx, win) {
 
   let mode = 'home';        // 'home' | 'room'
   let code = null;
+  let writeToken = null;    // per-room write secret (source only; null = read-only)
   let role = null;          // 'host' | 'guest'
   let conn = null;          // WS connection handle
   let tunnel = null;        // WebRTC tunnel (lazy)
@@ -80,7 +81,9 @@ export function createApp(initialCtx, win) {
   async function createRoom(pushPath) {
     busy = true; setStatus('creating share…');
     try {
-      code = await share.createRoom();
+      const room = await share.createRoom();
+      code = room.code;
+      writeToken = room.token;
       role = 'host';
       mode = 'room';
       openConn(code);
@@ -108,9 +111,10 @@ export function createApp(initialCtx, win) {
 
   async function doPush(path) {
     if (!fs.exists(path)) { setStatus('no such path: ' + path); return; }
+    if (!writeToken) { setStatus('read-only: only the source can push'); return; }
     busy = true; setStatus('pushing ' + path + '…');
     try {
-      const { pushed, tooLarge } = await share.pushPath(code, path);
+      const { pushed, tooLarge } = await share.pushPath(code, path, writeToken);
       await refresh();
       if (tooLarge.length) {
         // Files over the DO cap go peer-to-peer to every connected peer.
@@ -138,7 +142,8 @@ export function createApp(initialCtx, win) {
 
   async function delSelected() {
     const f = files[sel]; if (!f) return;
-    try { await share.deleteFile(code, f.path); await refresh(); setStatus('deleted ' + f.path); }
+    if (!writeToken) { setStatus('read-only: only the source can remove files'); return; }
+    try { await share.deleteFile(code, f.path, writeToken); await refresh(); setStatus('deleted ' + f.path); }
     catch (e) { setStatus('delete failed: ' + e.message); }
   }
 
@@ -156,7 +161,7 @@ export function createApp(initialCtx, win) {
     if (conn) conn.close();
     if (tunnel) tunnel.close();
     conn = null; tunnel = null;
-    mode = 'home'; code = null; role = null; files = []; sel = 0; peers = 0;
+    mode = 'home'; code = null; writeToken = null; role = null; files = []; sel = 0; peers = 0;
     setStatus('left share');
   }
 
@@ -230,7 +235,10 @@ export function createApp(initialCtx, win) {
   function renderRoom(ctx, C, W, H) {
     // Header: link + actions.
     ctx.text(2, 2, ('link: ' + location.origin + '/?share=' + code).slice(0, W - 2), { fg: C.link, bg: C.bg });
-    ctx.text(2, 3, '[P]ush  [S]ave all  [O]pen  [Y] copy link  [Del] remove  [L]eave'.slice(0, W - 2), { fg: C.fgDim, bg: C.bg });
+    const actions = writeToken
+      ? '[P]ush  [S]ave all  [O]pen  [Y] copy link  [Del] remove  [L]eave'
+      : '[S]ave all  [O]pen  [Y] copy link  [L]eave  (read-only)';
+    ctx.text(2, 3, actions.slice(0, W - 2), { fg: C.fgDim, bg: C.bg });
 
     // File list.
     const top = 5;
@@ -287,7 +295,7 @@ export function createApp(initialCtx, win) {
     // room mode
     if (k === 'ArrowUp') { if (sel > 0) sel--; return; }
     if (k === 'ArrowDown') { if (sel < files.length - 1) sel++; return; }
-    if (e.code === 'KeyP') { prompt = { kind: 'push', label: 'push path: /', buf: '' }; return; }
+    if (e.code === 'KeyP') { if (writeToken) prompt = { kind: 'push', label: 'push path: /', buf: '' }; else setStatus('read-only: only the source can push'); return; }
     if (e.code === 'KeyS') { pullAll(); return; }
     if (e.code === 'KeyO') { openSelected(); return; }
     if (e.code === 'KeyY') { copyLink(); return; }

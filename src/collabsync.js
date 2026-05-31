@@ -14,6 +14,8 @@
 // Not pure (it reads/writes the FS) — that's why it lives apart from the
 // transport-only collab.js. No engine/DOM though.
 
+import { isSafeRel } from './pathsafe.js';
+
 const TEXT_EXT = new Set([
   'txt', 'md', 'json', 'acii', 'html', 'htm', 'css', 'js', 'mjs', 'ts', 'xml',
   'svg', 'csv', 'tsv', 'yaml', 'yml', 'log', 'sh', 'py', 'toml', 'ini', 'conf',
@@ -103,10 +105,12 @@ export function createDesktopSync({ fs, client, room, token, isOwner, canWrite }
     applying++;
     try {
       if (evt.op === 'deleted') {
+        if (!isSafeRel(evt.path)) return;       // reject traversal from a hostile peer
         shadow.delete(evt.path);
         try { fs.delete(joinRel(evt.path)); } catch {}
       } else if (evt.file) {
         const rel = evt.file.path;
+        if (!isSafeRel(rel)) return;            // never let `../` escape the room mount
         const { bytes } = await client.fsPull(room, token, rel);
         shadow.set(rel, { hash: djb2(bytes), mtime: evt.file.mtime });
         fs.write(joinRel(rel), new Uint8Array(bytes));

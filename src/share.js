@@ -15,6 +15,8 @@
 // to the peer-to-peer tunnel. Mirror of SHARE_MAX_FILE in the worker.
 export const SHARE_MAX_FILE = 256 * 1024;
 
+import { isSafeRel } from './pathsafe.js';
+
 // Minimal extension→MIME map (the worker only needs text-ness; this keeps the
 // stored content-type meaningful for getFile + Media House rendering).
 const MIME = {
@@ -51,12 +53,15 @@ export function createShareClient({ fs, apiBase = '/api/share' } = {}) {
     return `${apiBase}/${code}/file?path=${encodeURIComponent(path)}`;
   }
 
-  // Mint a fresh room and return its code.
+  // Mint a fresh room. Returns { code, token } — the code is the read/join
+  // capability (goes in the share link), the token is the per-room WRITE secret
+  // the source keeps private and passes to push/delete. A joiner only has the
+  // code, so they're read-only.
   async function createRoom() {
     const res = await fetch(apiBase + '/new', { method: 'POST' });
     const data = await res.json().catch(() => null);
     if (!res.ok || !data || !data.code) throw new Error((data && data.error) || 'could not create share');
-    return data.code;
+    return { code: data.code, token: data.token || '' };
   }
 
   async function getManifest(code) {
@@ -83,9 +88,10 @@ export function createShareClient({ fs, apiBase = '/api/share' } = {}) {
     return out;
   }
 
-  // Push one FS file into the room. Returns the file meta, or throws (incl. 413
-  // 'too large' so the caller can route it through the tunnel instead).
-  async function pushFile(code, src, rel = basename(src)) {
+  // Push one FS file into the room (needs the room's write `token`). Returns the
+  // file meta, or throws (incl. 413 'too large' so the caller can route it
+  // through the tunnel instead).
+  async function pushFile(code, src, rel = basename(src), token = '') {
     const mime = mimeFor(src);
     const bytes = await fs.readBytesAsync(src);          // ArrayBuffer
     if (bytes.byteLength > SHARE_MAX_FILE) {
@@ -96,7 +102,7 @@ export function createShareClient({ fs, apiBase = '/api/share' } = {}) {
     const st = fs.stat(src) || {};
     const res = await fetch(fileUrl(code, rel), {
       method: 'PUT',
-      headers: { 'content-type': mime, 'x-mtime': String(st.mtime || Date.now()) },
+      headers: { 'content-type': mime, 'x-mtime': String(st.mtime || Date.now()), 'x-share-token': token },
       body: bytes,
     });
     const data = await res.json().catch(() => null);
@@ -110,11 +116,11 @@ export function createShareClient({ fs, apiBase = '/api/share' } = {}) {
 
   // Push a path (file or folder). Returns { pushed:[...], tooLarge:[...] } so the
   // UI can report which files need the tunnel.
-  async function pushPath(code, root) {
+  async function pushPath(code, root, token = '') {
     const files = collectFiles(root);
     const pushed = [], tooLarge = [];
     for (const f of files) {
-      try { pushed.push(await pushFile(code, f.src, f.rel)); }
+      try { pushed.push(await pushFile(code, f.src, f.rel, token)); }
       catch (e) { if (e.tooLarge) tooLarge.push({ src: f.src, rel: f.rel, size: e.size }); else throw e; }
     }
     return { pushed, tooLarge };
@@ -122,6 +128,8 @@ export function createShareClient({ fs, apiBase = '/api/share' } = {}) {
 
   // Pull one room file into the FS under destDir (preserving its relative path).
   async function pullFile(code, file, destDir) {
+    // The manifest comes from a peer — never let a crafted path escape destDir.
+    if (!isSafeRel(file.path)) throw new Error('unsafe path in manifest: ' + file.path);
     const res = await fetch(fileUrl(code, file.path));
     if (!res.ok) throw new Error('pull failed: HTTP ' + res.status);
     const dest = joinPath(destDir, file.path);
@@ -138,8 +146,8 @@ export function createShareClient({ fs, apiBase = '/api/share' } = {}) {
     return out;
   }
 
-  async function deleteFile(code, path) {
-    const res = await fetch(fileUrl(code, path), { method: 'DELETE' });
+  async function deleteFile(code, path, token = '') {
+    const res = await fetch(fileUrl(code, path), { method: 'DELETE', headers: { 'x-share-token': token } });
     if (!res.ok) throw new Error('delete failed: HTTP ' + res.status);
   }
 
