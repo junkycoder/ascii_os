@@ -50,6 +50,15 @@ export function createEngine(opts = {}) {
 
   let spans = []; // 2D array [r][c] -> span
 
+  // ── Listener tracking ───────────────────────────────────────────────
+  // Every addEventListener goes through `on()` so destroy() can remove them
+  // all. Without this the engine leaks ~17 global/root listeners per instance.
+  const listeners = []; // { target, type, handler, opts }
+  function on(targetEl, type, handler, optsArg) {
+    targetEl.addEventListener(type, handler, optsArg);
+    listeners.push({ target: targetEl, type, handler, opts: optsArg });
+  }
+
   function makeBuffer(c, r) {
     const buf = new Array(r);
     for (let y = 0; y < r; y++) {
@@ -201,6 +210,10 @@ export function createEngine(opts = {}) {
   let fpsAcc = 0;
   let fpsLast = performance.now();
   const fps = signal(0);
+  // Pending scheduler handles so stop()/destroy() can cancel cleanly and not
+  // re-arm after a stop (hidden-tab fallback uses setTimeout, else RAF).
+  let rafId = null;
+  let fallbackTimer = null;
 
   function tick(t) {
     if (!running) return;
@@ -223,13 +236,22 @@ export function createEngine(opts = {}) {
   }
 
   function schedule() {
+    if (!running) return; // never re-arm after a stop
     // RAF when tab is visible (vsync-aligned), fallback to setTimeout
     // when hidden so the engine keeps ticking for background work.
     if (document.hidden) {
-      setTimeout(() => tick(performance.now()), 1000 / fpsCap.peek());
+      fallbackTimer = setTimeout(() => {
+        fallbackTimer = null;
+        tick(performance.now());
+      }, 1000 / fpsCap.peek());
     } else {
-      requestAnimationFrame(tick);
+      rafId = requestAnimationFrame((t) => { rafId = null; tick(t); });
     }
+  }
+
+  function cancelScheduled() {
+    if (rafId != null) { cancelAnimationFrame(rafId); rafId = null; }
+    if (fallbackTimer != null) { clearTimeout(fallbackTimer); fallbackTimer = null; }
   }
 
   function start() {
@@ -240,7 +262,10 @@ export function createEngine(opts = {}) {
     fpsLast = performance.now();
     schedule();
   }
-  function stop() { running = false; }
+  function stop() {
+    running = false;
+    cancelScheduled();
+  }
 
   // ── Inputs ──────────────────────────────────────────────────────
   const keyHandlers = new Set();
@@ -251,12 +276,12 @@ export function createEngine(opts = {}) {
   function onMouse(fn) { mouseHandlers.add(fn); return () => mouseHandlers.delete(fn); }
   function isKeyDown(k) { return keysDown.has(k); }
 
-  root.addEventListener("keydown", (e) => {
+  on(root, "keydown", (e) => {
     keysDown.add(e.key);
     for (const h of keyHandlers) h({ type: "down", key: e.key, code: e.code, ctrl: e.ctrlKey, shift: e.shiftKey, alt: e.altKey, meta: e.metaKey, raw: e });
     if (["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", " "].includes(e.key)) e.preventDefault();
   });
-  root.addEventListener("keyup", (e) => {
+  on(root, "keyup", (e) => {
     keysDown.delete(e.key);
     for (const h of keyHandlers) h({ type: "up", key: e.key, code: e.code, raw: e });
   });
@@ -271,13 +296,13 @@ export function createEngine(opts = {}) {
   }
   // Suppress browser text-selection during drag.
   // We still allow selection via dbl-click / triple-click / shift-click.
-  root.addEventListener("selectstart", (e) => {
+  on(root, "selectstart", (e) => {
     if (e.detail && e.detail >= 2) return; // dbl/triple click — let it select
     e.preventDefault();
   });
   let wheelAccum = 0; // pixels of wheel travel not yet turned into a line step
   ["mousedown", "mouseup", "mousemove", "click", "dblclick", "wheel"].forEach((evt) => {
-    root.addEventListener(evt, (e) => {
+    on(root, evt, (e) => {
       if (evt === "mousedown" && e.button === 0 && !e.shiftKey) {
         // Block browser from starting a text selection on left-click drags.
         // preventDefault() also suppresses the browser's default focus-on-click,
@@ -309,7 +334,7 @@ export function createEngine(opts = {}) {
   // We swallow the native menu and dispatch our own event to handlers.
   const contextHandlers = new Set();
   function onContextMenu(fn) { contextHandlers.add(fn); return () => contextHandlers.delete(fn); }
-  root.addEventListener("contextmenu", (e) => {
+  on(root, "contextmenu", (e) => {
     e.preventDefault();
     const { x, y } = cellFromEvent(e);
     for (const h of contextHandlers) h({ x, y, raw: e });
@@ -341,17 +366,17 @@ export function createEngine(opts = {}) {
     };
   }
 
-  root.addEventListener("dragover", (e) => {
+  on(root, "dragover", (e) => {
     e.preventDefault();
     if (e.dataTransfer) e.dataTransfer.dropEffect = "copy";
     const { x, y } = cellFromEvent(e);
     for (const h of dropOverHandlers) h({ x, y, raw: e });
   });
-  root.addEventListener("dragleave", (e) => {
+  on(root, "dragleave", (e) => {
     const { x, y } = cellFromEvent(e);
     for (const h of dropOverHandlers) h({ x, y, leaving: true, raw: e });
   });
-  root.addEventListener("drop", async (e) => {
+  on(root, "drop", async (e) => {
     e.preventDefault();
     const { x, y } = cellFromEvent(e);
     const files = e.dataTransfer ? [...e.dataTransfer.files].map(wrapFile) : [];
@@ -389,7 +414,7 @@ export function createEngine(opts = {}) {
   }
   function dispatchTouch(ev) { for (const h of touchHandlers) h(ev); }
 
-  root.addEventListener("touchstart", (e) => {
+  on(root, "touchstart", (e) => {
     if (e.touches.length !== 1) return;
     const { x, y } = cellFromTouch(e.touches[0]);
     touchStart = { x, y, t: performance.now() };
@@ -400,7 +425,7 @@ export function createEngine(opts = {}) {
     }, 500);
     e.preventDefault();
   }, { passive: false });
-  root.addEventListener("touchmove", (e) => {
+  on(root, "touchmove", (e) => {
     if (!touchStart || e.touches.length !== 1) return;
     const { x, y } = cellFromTouch(e.touches[0]);
     // sx/sy = movement since the previous move event (cells). Apps use these for
@@ -414,7 +439,7 @@ export function createEngine(opts = {}) {
     }
     e.preventDefault();
   }, { passive: false });
-  root.addEventListener("touchend", (e) => {
+  on(root, "touchend", (e) => {
     if (!touchStart) return;
     if (longPressTimer) { clearTimeout(longPressTimer); longPressTimer = null; }
     const dt = performance.now() - touchStart.t;
@@ -500,6 +525,29 @@ export function createEngine(opts = {}) {
     };
   }
 
+  // ── Teardown ─────────────────────────────────────────────────────
+  // Stop the loop, cancel any pending RAF / fallback tick, remove EVERY
+  // listener we registered, drop the DOM, and clear handler sets so nothing
+  // keeps the engine (or its closures) alive after the host is done with it.
+  function destroy() {
+    stop(); // sets running=false + cancels pending RAF/timeout
+    cancelScheduled();
+    if (longPressTimer) { clearTimeout(longPressTimer); longPressTimer = null; }
+    for (const { target: t, type, handler, opts } of listeners) {
+      try { t.removeEventListener(type, handler, opts); } catch (_) {}
+    }
+    listeners.length = 0;
+    frameHandlers.clear();
+    keyHandlers.clear();
+    mouseHandlers.clear();
+    contextHandlers.clear();
+    dropHandlers.clear();
+    dropOverHandlers.clear();
+    touchHandlers.clear();
+    keysDown.clear();
+    try { root.remove(); } catch (_) {}
+  }
+
   return {
     root,
     theme,
@@ -507,7 +555,7 @@ export function createEngine(opts = {}) {
     resize, clear, put, text, rect, box,
     subContext,
     onFrame, onKey, onMouse, onTouch, onContextMenu, onFileDrop, onDragOver, isKeyDown,
-    start, stop,
+    start, stop, destroy,
     flush, // manual flush (for static scenes)
     themes,
   };

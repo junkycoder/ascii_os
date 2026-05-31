@@ -13,7 +13,7 @@
 // The WM owns all chrome (border, title bar, buttons) and clips the body to
 // the inner rect via engine.subContext. Apps just draw into ctx in local coords.
 
-import { signal, computed, effect } from './signals.js';
+import { signal } from './signals.js';
 
 const MIN_W = 10;
 const MIN_H = 4;
@@ -72,7 +72,15 @@ export function createWindowManager(engine, opts = {}) {
       restore() { restoreWindow(win); },
     };
 
-    win.focused = computed(() => focused.value === win);
+    // A lazy view onto the shared `focused` signal rather than a per-window
+    // computed: a computed subscribes to `focused` forever and is never
+    // disposed on removeWindow (signals expose no effect teardown), so every
+    // closed window would leak a live subscription. This reads on access
+    // instead — same { value, peek() } shape, zero retained subscription.
+    win.focused = {
+      get value() { return focused.value === win; },
+      peek() { return focused.peek() === win; },
+    };
 
     // Helpers attached to win so handlers can access without closure soup.
     win._saveGeom = () => {
@@ -206,16 +214,26 @@ export function createWindowManager(engine, opts = {}) {
     }
   }
 
-  // If engine resizes while a window is maximized, follow.
-  effect(() => {
-    const c = engine.cols.value, r = engine.rows.value;
+  // ── Teardown tracking ────────────────────────────────────────────
+  // Every engine subscription / event handler returns an unsubscriber; we
+  // collect them so destroy() can release the WM cleanly (otherwise the WM
+  // keeps live listeners on the long-lived engine signals after it's gone).
+  const disposers = [];
+
+  // If engine resizes while a window is maximized, follow. Use explicit
+  // signal.subscribe (which returns a real unsubscriber) rather than effect()
+  // — effect() can't be disposed, and these read the long-lived engine.cols/
+  // rows signals, so it would leak on wm.destroy().
+  function followMaximized() {
     for (const win of windows.peek()) {
       if (win.maximized.peek() && !win.minimized.peek()) {
         win.x.value = 0; win.y.value = 0;
-        win.w.value = c; win.h.value = r;
+        win.w.value = engine.cols.peek(); win.h.value = engine.rows.peek();
       }
     }
-  });
+  }
+  disposers.push(engine.cols.subscribe(followMaximized));
+  disposers.push(engine.rows.subscribe(followMaximized));
 
   // ── Hit testing ──────────────────────────────────────────────────
   // Each region a click can land in.
@@ -304,7 +322,7 @@ export function createWindowManager(engine, opts = {}) {
   // also fires on body / borders and we want title-only behaviour.
   let lastTitleClick = { t: 0, win: null, x: 0, y: 0 };
 
-  engine.onMouse((e) => {
+  disposers.push(engine.onMouse((e) => {
     if (e.type === 'mousedown') {
       const hit = hitTest(e.x, e.y);
       if (!hit) return;
@@ -390,7 +408,7 @@ export function createWindowManager(engine, opts = {}) {
       // Already handled on mousedown; nothing to do. We avoid acting here so
       // we don't get duplicate close-button activations.
     }
-  });
+  }));
 
   // ── Touch ────────────────────────────────────────────────────────
   // Touch model:
@@ -402,7 +420,7 @@ export function createWindowManager(engine, opts = {}) {
   //   swipe inside body    → app's concern; we don't intercept
   let touchDrag = null; // { win, grabDX, grabDY }
 
-  engine.onTouch((e) => {
+  disposers.push(engine.onTouch((e) => {
     if (e.type === 'start') {
       // Nothing to do until we know it's a tap/longpress/swipe.
       return;
@@ -451,10 +469,10 @@ export function createWindowManager(engine, opts = {}) {
     if (e.type === 'end' || e.type === 'swipe') {
       touchDrag = null;
     }
-  });
+  }));
 
   // ── Keyboard ─────────────────────────────────────────────────────
-  engine.onKey((e) => {
+  disposers.push(engine.onKey((e) => {
     if (e.type !== 'down') return;
     // Alt+Tab / Alt+Shift+Tab — cycle focus.
     if (e.alt && e.key === 'Tab') {
@@ -469,7 +487,7 @@ export function createWindowManager(engine, opts = {}) {
       e.raw?.preventDefault?.();
       return;
     }
-  });
+  }));
 
   // ── Rendering ────────────────────────────────────────────────────
   function render() {
@@ -583,6 +601,17 @@ export function createWindowManager(engine, opts = {}) {
     }
   }
 
+  // ── Teardown ─────────────────────────────────────────────────────
+  // Close every window (which runs each app's onClose → destroy()), then
+  // release the engine subscriptions (mouse/touch/key + the maximize-follow
+  // signal subscriptions). After this the WM holds no live engine listeners.
+  function destroy() {
+    for (const win of windows.peek().slice()) removeWindow(win);
+    for (const dispose of disposers) { try { dispose(); } catch (_) {} }
+    disposers.length = 0;
+    focused.value = null;
+  }
+
   return {
     // Mutators
     addWindow,
@@ -595,6 +624,7 @@ export function createWindowManager(engine, opts = {}) {
     restore: restoreWindow,
     toggleMinimize,
     isMinimized,
+    destroy,
 
     // State (signals)
     focused,
