@@ -234,6 +234,31 @@
         import('./src/apps/feedback.js' + V),
       ]);
 
+      // Collaborative desktop: connect this user to their room's presence (who's
+      // here + live cursors) AND sync the shared desktop FS. The room is the
+      // owner's user id (a remembered invite carries someone else's room). The
+      // owner's /desktop mirrors into the room; joiners see it under /room/<owner>/.
+      let collabConn = null, collabClient = null, collabSync = null;
+      const sess = auth.getSession();
+      const room = (sess && sess.room) || user.id;
+      const isOwner = room === user.id;
+      const canWrite = isOwner || (sess && sess.rights === 'write');
+      if (sess && sess.token) {
+        try {
+          const [{ createCollabClient }, { createDesktopSync }] = await Promise.all([
+            import('./src/collab.js' + V),
+            import('./src/collabsync.js' + V),
+          ]);
+          collabClient = createCollabClient();
+          collabSync = createDesktopSync({
+            fs: globalThis.__aciiFS, client: collabClient,
+            room, token: sess.token, isOwner, canWrite,
+          });
+          collabConn = collabClient.connect(room, sess.token, { onFs: (m) => collabSync.onRemote(m) });
+          collabSync.start();
+        } catch (e) { console.warn('collab unavailable', e); }
+      }
+
       const appRegistry = [
         { id: 'readme',    label: 'README',    icon: '[?]', factory: createReadme },
         { id: 'findman',   label: 'Findman',   icon: '[▸]', factory: createFindman },
@@ -256,6 +281,10 @@
         storageKey: auth.shellKey(user),
         user,
         onLogout: () => { auth.clearSession(); location.reload(); },
+        // Collaborative presence: the live socket + the inviter (owner only).
+        collab: collabConn,
+        canInvite: isOwner && !!(sess && sess.token),
+        onInvite: (email, nick) => collabClient && collabClient.invite(sess.token, { email, nick }),
       });
 
       const offFrame = engine.onFrame(() => shell.render());
@@ -308,7 +337,15 @@
       // unconsumed for the app to verify. Nothing more to do in this tab.
     } else if (urlToken) {
       const login = startLogin();
-      await login.signIn(urlToken);   // verify → onLogin → bootShell (or surfaces an error)
+      // An invite link (carries a room) for a NEW email gets a nickname step;
+      // existing accounts (and plain sign-in links) go straight through verify.
+      let info = null;
+      try { info = await auth.peek(urlToken); } catch (_) {}
+      if (info && info.valid && info.invite && !info.exists) {
+        await login.signInInvite(urlToken, info);
+      } else {
+        await login.signIn(urlToken); // verify → onLogin → bootShell (or surfaces an error)
+      }
     } else if (session) {
       await bootShell(session.user);
       // Long-remember: only sign out if the server explicitly rejects the token.

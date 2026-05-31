@@ -138,6 +138,37 @@ export function createApp(initialCtx, win) {
     }
   }
 
+  // ── Clipboard ────────────────────────────────────────────────────────────
+  // The engine renders into a DOM cell grid, so a field is NOT a native input —
+  // browser Cmd/Ctrl+V/C never lands in it. Drive the system clipboard ourselves
+  // for the focused field (used by both the keyboard shortcuts and the right-click
+  // menu). Fields here are single-line, so collapse whitespace on paste.
+  function pasteInto(f) {
+    if (!f) return;
+    if (!(navigator.clipboard && navigator.clipboard.readText)) {
+      setStatus('Clipboard unavailable in this browser', 'error');
+      return;
+    }
+    navigator.clipboard.readText().then((txt) => {
+      if (!txt) return;
+      const clean = txt.replace(/[\r\n\t]+/g, ' ').trim();
+      const v = f.value, cur = f.caret;
+      f.value = v.slice(0, cur) + clean + v.slice(cur);
+      f.caret = cur + clean.length;
+      setStatus('Pasted', 'info');
+    }).catch(() => setStatus('Clipboard blocked — allow paste, or type it in', 'error'));
+  }
+  function copyFrom(f) {
+    if (!f || !f.value) return;
+    if (!(navigator.clipboard && navigator.clipboard.writeText)) {
+      setStatus('Clipboard unavailable in this browser', 'error');
+      return;
+    }
+    navigator.clipboard.writeText(f.value)
+      .then(() => setStatus('Copied', 'info'))
+      .catch(() => setStatus('Copy blocked', 'error'));
+  }
+
   // ── Field editing ──────────────────────────────────────────────────────
   function editField(f, e) {
     const v = f.value, cur = f.caret;
@@ -338,6 +369,16 @@ export function createApp(initialCtx, win) {
       if (k === 'Tab') { e.raw?.preventDefault?.(); moveFocus(e.shift ? -1 : 1); return; }
       const cur = curFocus();
 
+      // Clipboard on a focused text field (Cmd/Ctrl + V/C/X). The grid isn't a
+      // native input, so these never reach the browser — handle them ourselves.
+      // Use e.code (layout-independent) since Option+letter mangles e.key on mac.
+      if (cur.kind === 'field' && (e.ctrl || e.meta) && !e.alt) {
+        const f = fields[cur.id];
+        if (e.code === 'KeyV') { e.raw?.preventDefault?.(); pasteInto(f); return; }
+        if (e.code === 'KeyC') { e.raw?.preventDefault?.(); copyFrom(f); return; }
+        if (e.code === 'KeyX') { e.raw?.preventDefault?.(); copyFrom(f); f.value = ''; f.caret = 0; return; }
+      }
+
       // Enter: field-specific advance/submit, or activate a focused button.
       if (k === 'Enter') {
         if (cur.id === 'desc') { focusId('dur'); return; }
@@ -361,7 +402,7 @@ export function createApp(initialCtx, win) {
 
     onMouse(e) {
       if (e.type === 'wheel') {
-        listScroll = Math.max(0, listScroll + (e.deltaY > 0 ? 1 : -1));
+        listScroll = Math.max(0, listScroll + (e.lines || 0));
         return;
       }
       if (e.type !== 'click' && e.type !== 'mousedown') return;
@@ -380,8 +421,29 @@ export function createApp(initialCtx, win) {
     },
 
     onTouch(e) {
+      // Drag scrolls the summary list, content following the finger.
+      if (e.type === 'move' && e.sy) { listScroll = Math.max(0, listScroll - e.sy); return; }
       if (e.type !== 'tap') return;
       this.onMouse({ type: 'click', x: e.x, y: e.y, button: 0 });
+    },
+
+    // Right-click (LOCAL coords) → focus the field under the cursor (or fall back
+    // to the focused field) and offer clipboard actions. The shell renders the
+    // returned { items } through its shared menu surface; null defers to the
+    // desktop menu. Lets users paste an API token without a keyboard.
+    onContextMenu(e) {
+      let target = null;
+      for (const h of hits) {
+        if (h.kind === 'field' && e.x >= h.x && e.x < h.x + h.w && e.y >= h.y && e.y < h.y + h.h) {
+          focusId(h.id); target = fields[h.id]; break;
+        }
+      }
+      if (!target) { const cur = curFocus(); if (cur.kind === 'field') target = fields[cur.id]; }
+      if (!target) return null;
+      const items = [{ label: 'Paste', hotkey: 'V', onSelect: () => pasteInto(target) }];
+      if (!target.secret && target.value) items.push({ label: 'Copy', hotkey: 'C', onSelect: () => copyFrom(target) });
+      if (target.value) items.push({ label: 'Clear field', danger: true, onSelect: () => { target.value = ''; target.caret = 0; } });
+      return { items };
     },
 
     destroy() {},

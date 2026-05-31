@@ -11,40 +11,39 @@ import { createMarkdownView } from "../markdown.js";
 
 const DEFAULT_README = `# FakanOS
 
-A tiny **ASCII operating environment** for the web — a reactive grid renderer,
-a window manager, and a handful of apps. Runs *anywhere* the web runs:
-desktop, mobile, TV, even a smartwatch if you squint.
+A **workspace for digital makers** — writers, coders, designers, musicians,
+and everyone tinkering at the edges. One calm, text-first desktop in your
+browser. Runs *anywhere* the web runs: laptop, phone, tablet, TV.
 
 ---
 
-## Why
+## What it's for
 
-Most UI frameworks pretend pixels are infinite. *FakanOS* picks the opposite
-constraint: every screen is a grid of characters. The result is fast,
-themeable, accessible, and refreshingly small.
+A place to *make things* without the noise. Write notes and docs, sketch in
+ASCII, keep your files, play with sound and pictures, share work with a friend
+— all in one quiet, copyable, keyboard-friendly space.
 
-> Zero dependencies. No build step. No TypeScript.
-> One \`<script type="module">\` and you're running.
+> No accounts to juggle. No clutter. Just a desktop that gets out of your way
+> and lets you work.
 
-## Quick start
+## The studio
 
-\`\`\`js
-import { createEngine } from './engine.js'
-const engine = createEngine({ target: '#app', cols: 80, rows: 24 })
-engine.onFrame(() => engine.text(2, 1, 'hello, grid'))
-engine.start()
-\`\`\`
+- **Notes & docs** — jot, draft, and edit. Your words auto-save as you type.
+- **Findman** — browse and open your files; edit text with optional vim keys.
+- **Paint** — sketch and doodle directly on the character grid.
+- **Media House** — bring in images, video, and audio; turn pictures into ASCII.
+- **Music** — play your own tracks or tune into open internet radio.
+- **Terminal** — a real shell for the curious and the command-line crowd.
+- **Share** — hand a file to someone with a code; live sync, no setup.
 
-## Controls
+## Make it yours
 
-- **Arrow keys** — scroll line by line
-- **PageUp / PageDown** — scroll a screen at a time
-- **Home / End** — jump to top or bottom
-- **Tab / Shift+Tab** — cycle through links
-- **Enter** — open the focused link
-- **Mouse wheel** — scroll; **click** — follow a link
+- **Themes** — flip the whole desktop's palette in an instant.
+- **Widgets** — drop a clock, system stats, or a sticky note on your desktop.
+- **Wallpaper & layout** — arrange windows the way you think.
+- **On any screen** — touch, mouse, or keyboard; it adapts to what you've got.
 
-## Shortcuts
+## Getting around
 
 - **1–9** — launch an app (when no window is focused)
 - **Cmd/Ctrl + number** — always launch an app
@@ -55,21 +54,17 @@ engine.start()
 - **Alt+W** — spawn a desktop widget (clock → stats → note)
 - **Alt+H** — move the taskbar (bottom → top → hidden)
 
-## What ships
+## Reading this doc
 
-1. A reactive *signals* primitive (\`signal\`, \`computed\`, \`effect\`)
-2. The grid \`engine\` with theming, input, sub-contexts
-3. A windowing layer with focus, drag, resize
-4. Apps: terminal, editor, file browser, and this reader
-
-## Learn more
-
-See the [project page](https://github.com/) or read the engine source —
-it's about ~500 lines and ~~scary~~ approachable.
+- **Arrow keys** — scroll line by line
+- **PageUp / PageDown** — scroll a screen at a time
+- **Home / End** — jump to top or bottom
+- **Tab / Shift+Tab** — cycle through links · **Enter** — open one
+- **Mouse wheel** — scroll · **click** — follow a link
 
 ---
 
-_Made with monospace and stubbornness._
+_Made with monospace and stubbornness — for the people who still like to make._
 `;
 
 export function createApp(initialCtx, win) {
@@ -98,10 +93,10 @@ export function createApp(initialCtx, win) {
     },
     onTouch(e) {
       // Map touch gestures to scroll — the markdown view itself only knows
-      // about wheel/click, so we translate here.
-      if (e.type === "swipe") {
-        if (e.dir === "up") md.scroll(3);
-        else if (e.dir === "down") md.scroll(-3);
+      // about wheel/click, so we translate here. Drag tracks the finger 1:1
+      // (content follows finger): drag down → earlier lines, drag up → later.
+      if (e.type === "move") {
+        if (e.sy) md.scroll(-e.sy);
       } else if (e.type === "tap") {
         // Synthesize a click so link hit-testing fires.
         md.onMouse({ type: "click", x: e.x, y: e.y, button: 0 });

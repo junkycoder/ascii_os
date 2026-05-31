@@ -3,6 +3,23 @@ import { themes } from "./themes.js";
 
 const EMPTY_CH = " ";
 
+// ── Scroll tuning ────────────────────────────────────────────────────
+// One place to make wheel (desktop) and touch-drag (mobile) feel right.
+//  - WHEEL_PX_PER_LINE: pixels of wheel travel per scrolled text line. Higher
+//    = slower. Decouples scroll speed from how OFTEN the OS fires wheel events
+//    (macOS trackpads fire ~60/s, which used to scroll absurdly fast because
+//    every event moved a whole line). We accumulate raw pixels and only emit a
+//    line step once this threshold is crossed.
+const WHEEL_PX_PER_LINE = 40;
+// Browsers report wheel deltas in pixels (deltaMode 0), lines (1) or pages (2).
+// Normalise everything to pixels so the accumulator is consistent across mice
+// (often line/page mode) and trackpads (pixel mode).
+function wheelToPixels(e) {
+  if (e.deltaMode === 1) return e.deltaY * 16;   // lines → ~1 text line
+  if (e.deltaMode === 2) return e.deltaY * 400;  // pages → ~one viewport
+  return e.deltaY;                                // already pixels
+}
+
 function makeCell() {
   return { ch: EMPTY_CH, fg: null, bg: null, bold: false };
 }
@@ -258,13 +275,31 @@ export function createEngine(opts = {}) {
     if (e.detail && e.detail >= 2) return; // dbl/triple click — let it select
     e.preventDefault();
   });
+  let wheelAccum = 0; // pixels of wheel travel not yet turned into a line step
   ["mousedown", "mouseup", "mousemove", "click", "dblclick", "wheel"].forEach((evt) => {
     root.addEventListener(evt, (e) => {
       if (evt === "mousedown" && e.button === 0 && !e.shiftKey) {
         // Block browser from starting a text selection on left-click drags.
+        // preventDefault() also suppresses the browser's default focus-on-click,
+        // so once root lost keyboard focus (clicking browser chrome, a dialog,
+        // another tab) a click back into the grid wouldn't restore it and keys
+        // went nowhere. Refocus explicitly so typing always works after a click.
         e.preventDefault();
+        if (document.activeElement !== root) root.focus({ preventScroll: true });
       }
       const { x, y } = cellFromEvent(e);
+      if (evt === "wheel") {
+        // Accumulate pixels and emit a normalised integer `lines` step so scroll
+        // speed tracks distance travelled, not OS event frequency. Reset on a
+        // direction flip so reversing feels immediate.
+        const px = wheelToPixels(e);
+        if ((px < 0) !== (wheelAccum < 0)) wheelAccum = 0;
+        wheelAccum += px;
+        const lines = (wheelAccum / WHEEL_PX_PER_LINE) | 0; // trunc toward 0
+        wheelAccum -= lines * WHEEL_PX_PER_LINE;
+        for (const h of mouseHandlers) h({ type: evt, x, y, button: e.button, deltaY: e.deltaY, lines, raw: e });
+        return;
+      }
       for (const h of mouseHandlers) h({ type: evt, x, y, button: e.button, deltaY: e.deltaY, raw: e });
     });
   });
@@ -338,6 +373,7 @@ export function createEngine(opts = {}) {
   function onTouch(fn) { touchHandlers.add(fn); return () => touchHandlers.delete(fn); }
 
   let touchStart = null;     // {x, y, t} in cells/ms
+  let lastTouch = null;      // {x, y} of the previous move — for per-step deltas
   let lastTapT = 0;
   let lastTapPos = null;
   let longPressTimer = null;
@@ -357,6 +393,7 @@ export function createEngine(opts = {}) {
     if (e.touches.length !== 1) return;
     const { x, y } = cellFromTouch(e.touches[0]);
     touchStart = { x, y, t: performance.now() };
+    lastTouch = { x, y };
     dispatchTouch({ type: "start", x, y });
     longPressTimer = setTimeout(() => {
       if (touchStart) dispatchTouch({ type: "longpress", x, y });
@@ -366,7 +403,12 @@ export function createEngine(opts = {}) {
   root.addEventListener("touchmove", (e) => {
     if (!touchStart || e.touches.length !== 1) return;
     const { x, y } = cellFromTouch(e.touches[0]);
-    dispatchTouch({ type: "move", x, y, dx: x - touchStart.x, dy: y - touchStart.y });
+    // sx/sy = movement since the previous move event (cells). Apps use these for
+    // continuous, finger-tracking scroll — a whole gesture no longer collapses
+    // into one fixed-size `swipe` step at touchend (which felt far too slow).
+    const sx = x - lastTouch.x, sy = y - lastTouch.y;
+    dispatchTouch({ type: "move", x, y, dx: x - touchStart.x, dy: y - touchStart.y, sx, sy });
+    lastTouch = { x, y };
     if (longPressTimer && (Math.abs(x - touchStart.x) > 1 || Math.abs(y - touchStart.y) > 1)) {
       clearTimeout(longPressTimer); longPressTimer = null;
     }

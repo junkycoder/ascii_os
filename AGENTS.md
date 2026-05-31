@@ -92,6 +92,18 @@ signals → engine → { fs, user, drafts, themes } → { wm, ui, ui-menu, markd
   capped JSON blob (`feedback:v1`) in the **same `AUTH` KV**, and emails the
   author a themed thank-you via **Resend**. Reuses the live auth infra — no new
   bindings/secrets. Needs a live worker (the python devserver 404s the API).
+- **`collab.js`** — collaborative desktop. A room is one owner's desktop, keyed
+  by the **owner's user id**; people join by **email invite** (owner → user-chip
+  "Invite to desktop…" → magic link carrying the room). Boot `peek`s the token to
+  show a **nickname step only for a brand-new email** (registration only if new);
+  existing accounts go straight in. `verify` records DO membership + persists
+  `room` on the session. The `CollabRoom` DO (binding `COLLAB`) serves **live
+  presence** (who's here + cursors) over a WebSocket; the shell renders it from
+  `opts.collab`. **Phase 3 (shared desktop FS) is in:** `src/collabsync.js`
+  (`createDesktopSync`) mirrors the owner's `/desktop` ⇄ joiners' `/room/<owner>/`
+  two-way (write-rights gated, last-write-wins, loop-safe shadow map) — the DO
+  stores files + relays `{type:'fs',op}` on the presence WS. **Window/app
+  replication + co-editing CRDT (phase 4) are NOT built yet.**
 
 ### The app contract
 

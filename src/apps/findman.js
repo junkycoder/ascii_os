@@ -1159,7 +1159,7 @@ export function createApp(initialCtx, win) {
       if (e.type === 'wheel') {
         if (mdPreviewActive() && mdView) {
           if (mdView.onMouse) mdView.onMouse(e);
-          else if (mdView.scroll) mdView.scroll(e.deltaY > 0 ? 3 : -3);
+          else if (mdView.scroll) mdView.scroll(e.lines || 0);
         }
         return;
       }
@@ -1261,28 +1261,76 @@ export function createApp(initialCtx, win) {
         this.onMouse({ type: 'click', x: e.x, y: e.y });
       } else if (e.type === 'doubletap') {
         this.onMouse({ type: 'dblclick', x: e.x, y: e.y });
-      } else if (e.type === 'swipe') {
+      } else if (e.type === 'move' && e.sy) {
+        // Drag tracks the finger 1:1 (content follows finger). Route to whatever
+        // surface is active: tree selection, markdown preview, or the editor.
+        const step = e.sy; // cells moved this frame (down > 0)
         if (focus === 'tree') {
-          if (e.dir === 'up') moveSelection(3);
-          else if (e.dir === 'down') moveSelection(-3);
+          moveSelection(-step);
         } else if (mdPreviewActive() && mdView) {
-          if (mdView.scroll) mdView.scroll(e.dir === 'up' ? 3 : -3);
+          if (mdView.scroll) mdView.scroll(-step);
         } else {
           const lines = vim ? vim.lines : editorLines;
-          if (e.dir === 'up') {
-            const ny = Math.min(lines.length - 1, (vim ? vim.cursor.y : editorRow) + 3);
-            if (vim) { vim.cursor.y = ny; } else { editorRow = ny; clampCaret(); }
-          } else if (e.dir === 'down') {
-            const ny = Math.max(0, (vim ? vim.cursor.y : editorRow) - 3);
-            if (vim) { vim.cursor.y = ny; } else { editorRow = ny; clampCaret(); }
-          }
+          const ny = Math.max(0, Math.min(lines.length - 1, (vim ? vim.cursor.y : editorRow) - step));
+          if (vim) { vim.cursor.y = ny; } else { editorRow = ny; clampCaret(); }
         }
       }
     },
 
     onContextMenu(e) {
-      // Right-click anywhere opens the about box (lightweight menu surface).
-      showAbout = true;
+      // Right-click in the tree → a file menu (the shell renders the items we
+      // return). Right-click in the editor / chrome → the lightweight about box.
+      const W = initialCtx.width, H = initialCtx.height;
+      const lw = leftPaneWidth(W), paneH = H - 1;
+      const inTree = e.x >= 0 && e.x < lw && e.y >= 1 && e.y < paneH - 1;
+      if (!inTree) { showAbout = true; return null; }
+
+      const rowIdx = treeScroll + (e.y - 1);
+      const r = (rowIdx >= 0 && rowIdx < visibleRows.length) ? visibleRows[rowIdx] : null;
+
+      // Right-clicking a row that isn't already in the multi-selection makes it
+      // the cursor (so New/Rename/Delete act on what was clicked).
+      if (r && !r.isMountAction && !selected.has(r.path)) {
+        focus = 'tree';
+        clearMulti();
+        selectByIndex(rowIdx);
+        selAnchorIdx = rowIdx;
+      }
+
+      const sep = { type: 'separator' };
+      // The "+ mount local…" action row gets its own one-item menu.
+      if (r && r.isMountAction) {
+        return { items: [{ label: 'Mount local folder…', onSelect: () => tryMountLocal() }] };
+      }
+      // Empty space below the tree → create-in-root actions only.
+      if (!r) {
+        return { items: [
+          { label: 'New file…',   onSelect: () => newFile() },
+          { label: 'New folder…', onSelect: () => newFolder() },
+        ] };
+      }
+
+      const multi = selected.size > 1 && selected.has(r.path);
+      const isDir = r.type === 'dir';
+      const items = [];
+      if (!multi) {
+        items.push(isDir
+          ? { label: expanded.has(r.path) ? 'Collapse' : 'Expand', hotkey: '↵', onSelect: () => activateSelection() }
+          : { label: 'Open', hotkey: '↵', onSelect: () => activateSelection() });
+        items.push({ label: 'Share…', hotkey: 'S', onSelect: () => {
+          globalThis.__aciiSharePath = r.path;
+          globalThis.__aciiOpenApp?.('share');
+        } });
+        items.push(sep);
+      }
+      items.push({ label: 'New file…',   onSelect: () => newFile() });
+      items.push({ label: 'New folder…', onSelect: () => newFolder() });
+      if (!multi) items.push({ label: 'Rename…', hotkey: 'R', onSelect: () => renameSelected() });
+      items.push(sep);
+      items.push(multi
+        ? { label: `Delete ${selected.size} items`, danger: true, hotkey: '⌫', onSelect: () => deleteSelected() }
+        : { label: 'Delete', danger: true, hotkey: '⌫', onSelect: () => deleteSelected() });
+      return { items };
     },
 
     destroy() {

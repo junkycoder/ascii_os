@@ -290,7 +290,7 @@ export function createTextArea({ x, y, w, h, value = "", onChange }) {
     },
     onMouse(e) {
       if (e.type === "wheel" && inRect(e, x, y, w, h)) {
-        scrollY.value = Math.max(0, scrollY.peek() + (e.deltaY > 0 ? 1 : -1));
+        scrollY.value = Math.max(0, scrollY.peek() + (e.lines || 0));
         return true;
       }
       return false;
@@ -362,7 +362,7 @@ export function createList({ x, y, w, h, items = [], selectedIndex = 0, onSelect
     },
     onMouse(e) {
       if (e.type === "wheel" && inRect(e, x, y, w, h)) {
-        scroll.value = clamp(scroll.peek() + (e.deltaY > 0 ? 1 : -1), 0, Math.max(0, list.length - (h - 2)));
+        scroll.value = clamp(scroll.peek() + (e.lines || 0), 0, Math.max(0, list.length - (h - 2)));
         return true;
       }
       if (e.type === "click" && inRect(e, x, y, w, h)) {

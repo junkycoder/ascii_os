@@ -171,6 +171,37 @@ menu, or spacebar (Quick-Look) on the selection.
 - **Tunnel:** WebRTC data-channel transfer is implemented (chunked, backpressure)
   using STUN only; symmetric-NAT peers may need a TURN server later.
 
+### Collaborative desktop (Durable Object) — phase 1+2 landed, needs a live deploy
+
+- **Vision:** owner invites people by email → (nickname only if it's a new
+  account) → they land on the **owner's** desktop and everyone sees each other
+  live (presence: who's here + cursors). Access is **invite-only** (email).
+- **What's built (phase 1+2):**
+  - **Identity/invite:** `worker/index.js` — `/api/collab/invite` (owner-authed,
+    emails a magic link carrying `room`+`rights`); `/api/auth/peek` (inspect a
+    token without consuming, so boot can decide on the nickname step); `verify`
+    extended to accept `nick`+record DO membership + persist `room` on the
+    session (**registration only if the email is new** — existing users keep their
+    name). `auth.js`/`login.js` add the peek + nickname-step flow; `index.html`
+    boots into the room.
+  - **Presence:** `CollabRoom` DO (binding `COLLAB`, migration v2) holds members +
+    live presence over a WebSocket. `src/collab.js` (`createCollabClient`) +
+    `shell.js` overlay: remote cursors + a "who's here" strip + owner-only
+    "Invite to desktop…" in the user-chip menu.
+- **Phase 3 (shared desktop FS) — landed (`claude/collab-desktop-fs`):** the
+  owner's `/desktop` mirrors into the room and shows to joiners under
+  `/room/<owner>/` (browse via Findman). **Two-way**: a host invited with write
+  rights edits their copy → CollabRoom DO → broadcast → owner applies into
+  `/desktop` (and vice-versa); last-write-wins. `src/collabsync.js`
+  (`createDesktopSync`) runs a loop-safe shadow-map reconcile; the DO stores
+  files as `f:<rel>` + relays `{type:'fs',op}` on the presence WS; invite rights
+  ride the session. **NOT built:** window/app replication + co-editing CRDT
+  (phase 4). Like the rest of collab, **unverified against a live DO.**
+- **Deploy prereq:** the v2 DO migration (`new_sqlite_classes:["CollabRoom"]`)
+  applies on the next `wrangler deploy` / `trunk` push; needs Durable Objects
+  enabled (same as share). **Not verified against a live DO** (python devserver
+  can't run the worker; this env's network can't reach os.fakan.cz).
+
 ## OPEN / next priorities
 
 0. **Magic-link go-live — manual steps (code is done + verified locally):**
