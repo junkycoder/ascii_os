@@ -29,6 +29,37 @@ export function createCollabClient({ apiBase = '/api/collab' } = {}) {
     return data; // { owner, members:[{userId,nick,role,rights}] }
   }
 
+  // ── Shared desktop FS (two-way) ─────────────────────────────────
+  function fsFileUrl(room, token, path) {
+    return `${apiBase}/${room}/fs/file?t=${encodeURIComponent(token)}&path=${encodeURIComponent(path)}`;
+  }
+  async function fsManifest(room, token) {
+    const res = await fetch(`${apiBase}/${room}/fs/manifest?t=${encodeURIComponent(token)}`);
+    const data = await res.json().catch(() => null);
+    if (!res.ok) throw new Error((data && data.error) || ('HTTP ' + res.status));
+    return data; // { files:[{path,name,mime,size,mtime,hash}] }
+  }
+  async function fsPull(room, token, path) {
+    const res = await fetch(fsFileUrl(room, token, path));
+    if (!res.ok) throw new Error('pull failed: HTTP ' + res.status);
+    const ct = res.headers.get('content-type') || '';
+    return { mime: ct, bytes: await res.arrayBuffer() };
+  }
+  async function fsPush(room, token, path, bytes, { mime = 'application/octet-stream', mtime = Date.now(), hash = '' } = {}) {
+    const res = await fetch(fsFileUrl(room, token, path), {
+      method: 'PUT',
+      headers: { 'content-type': mime, 'x-mtime': String(mtime), 'x-hash': String(hash) },
+      body: bytes,
+    });
+    const data = await res.json().catch(() => null);
+    if (!res.ok) throw new Error((data && data.error) || ('HTTP ' + res.status));
+    return data.file;
+  }
+  async function fsDelete(room, token, path) {
+    const res = await fetch(fsFileUrl(room, token, path), { method: 'DELETE' });
+    if (!res.ok) throw new Error('delete failed: HTTP ' + res.status);
+  }
+
   // Open the presence socket. handlers: onHello({you,roster}), onRoster(roster),
   // onCursor({userId,nick,role,x,y}), onOpen, onClose. Returns a live handle.
   function connect(room, token, handlers = {}) {
@@ -53,6 +84,8 @@ export function createCollabClient({ apiBase = '/api/collab' } = {}) {
           const r = roster.find((p) => p.userId === m.userId);
           if (r) { r.x = m.x; r.y = m.y; }
           handlers.onCursor && handlers.onCursor(m);
+        } else if (m.type === 'fs') {
+          handlers.onFs && handlers.onFs(m); // { op:'added'|'updated'|'deleted', file?, path? }
         }
       };
       ws.onclose = () => {
@@ -82,5 +115,5 @@ export function createCollabClient({ apiBase = '/api/collab' } = {}) {
     };
   }
 
-  return { invite, members, connect };
+  return { invite, members, connect, fsManifest, fsPull, fsPush, fsDelete, fsFileUrl };
 }
