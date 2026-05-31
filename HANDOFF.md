@@ -90,6 +90,41 @@ Verified functional end-to-end:
     peer-to-peer over a **WebRTC tunnel** the same socket signals for. Pulls land
     in `/share/<code>/`. File context menu → "Share…" pushes a path; a
     `/?share=<code>` link opens straight into join.
+  - **gitdesk** (label **"Git Desk"**) — GitHub-Desktop-style client for the
+    in-browser git engine (`src/git.js`). Branch bar (click ⎇ chip → branch
+    menu: switch / new branch), **Changes** tab (file list with stage ☑/☐
+    checkboxes + unified diff pane + commit message box → commit), **History**
+    tab (log + per-commit detail). Keys: `Space` stage, `a` stage-all, `d`
+    discard, `b` branch menu, `c` edit message, `Enter` commit, `Tab` switch
+    tabs. Reads `globalThis.__aciiGitRepo` for an open-repo handoff.
+
+### Git integration (`src/git.js` — simulated git over the virtual FS)
+- **The "repo folder" concept:** any FS folder can be `init`'d into a repo;
+  state lives in `<repo>/.git/state.json` (written through the shared FS, so it
+  persists per-user for free and travels with the folder; `.git/` is invisible
+  to status). Shared singleton: `globalThis.__aciiGit ||= createGit(fs)`.
+- **Model:** HEAD → branch → commit chain, plus a two-stage area (working tree
+  vs. staging index). Commits snapshot file contents in full (FS is tiny) under
+  a djb2-derived short id. Pure logic, no DOM — exposes `changes` + `activeRepo`
+  signals like the other engine modules.
+- **API:** `isRepo/repoFor/listRepos · init · status/activeStatus · diff ·
+  stage/stageAll/unstage/unstageAll/discard · commit · log · branches/
+  createBranch/checkout · setActive`. LCS line diff returns ctx/add/del rows.
+- **Surfaced in the UI:**
+  - **Git Desk app** (above) — full client.
+  - **`git` desktop widget** — active repo: branch, clean/dirty count, commit
+    count; button opens Git Desk. Pin via desktop right-click → New widget → git.
+  - **Taskbar footer chip** — `⎇ <branch> ●N` for the active repo (left of the
+    user chip), tinted warning when dirty; click → Git Desk. Hidden with no repo.
+  - **Terminal** — `cwd` is real (over the shared FS) with `cd/pwd/ls/cat`; the
+    **prompt shows the branch** `acii:<cwd> (<branch>)>` inside a repo; a `git`
+    command does `init/status/add/commit -m/reset/log/branch/checkout [-b]`.
+  - **Desktop context menu** — Git → Initialize repo here (`/desktop`) / Open Git
+    Desk.
+- **Verified:** 24 engine unit tests (init/stage/commit/branch/checkout isolation/
+  diff/discard/persistence) + app render/input smoke tests (gitdesk no-repo,
+  changes list, stage→commit, history; terminal branch prompt + `git status`),
+  all via Node against a mock FS. Not yet exercised in a live browser tab.
 
 ### File-type routing (shell `openFile`)
 `.acii`→paint, video/image/audio exts→Media House, text exts→Findman,

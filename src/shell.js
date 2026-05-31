@@ -16,6 +16,7 @@
 import { signal, effect } from './signals.js';
 import { createWindowManager } from './wm.js';
 import { createFS } from './fs.js';
+import { createGit } from './git.js';
 import { createContextMenu } from './ui-menu.js';
 import { createMusicPlayer } from './music.js';
 import { createKeyboard } from './keyboard.js';
@@ -28,6 +29,10 @@ let _shellOpenApp = null;
 
 // Shared FS singleton — used by Paint, Finder, and Shell (desktop icons).
 const fs = globalThis.__aciiFS ||= createFS({ storageKey: 'acii.fs.v1' });
+
+// Shared git engine singleton — drives the git widget, taskbar branch chip,
+// Git Desk app and terminal `git` command. One instance over the shared FS.
+const git = globalThis.__aciiGit ||= createGit(fs);
 
 // Per-instance music players for the 'music' widget, keyed by widget id.
 const musicPlayers = new Map();
@@ -294,6 +299,50 @@ const WIDGETS = {
       }
       // Virtual FS footprint in localStorage.
       if (y < H - 1) ctx.text(1, y, `fs   ${fmtBytes(sysInfo.lsBytes)} · localStorage`, { fg: c.fgDim });
+    },
+  },
+  git: {
+    defaultSize: { w: 26, h: 6 },
+    label: 'git',
+    render(ctx, w) {
+      const c = ctx.theme.peek().colors;
+      const W = ctx.width, H = ctx.height;
+      git.changes.value; // subscribe → re-render when the repo mutates
+      ctx.box(0, 0, W, H, { fg: c.accent, glyphSet: 'borderRound' });
+      ctx.text(1, 0, ' git ', { fg: c.accent });
+
+      const s = git.activeStatus();
+      if (!s) {
+        ctx.text(1, 1, 'no repository'.slice(0, W - 2), { fg: c.warning });
+        if (H >= 4) ctx.text(1, 2, 'init one in Git Desk'.slice(0, W - 2), { fg: c.fgDim });
+        const b = '[ Open Git Desk ]';
+        const by = H - 2;
+        ctx.text(1, by, b.slice(0, W - 2), { fg: c.fg });
+        w._gitBtn = { x: 1, y: by, w: Math.min(b.length, W - 2), action: 'open' };
+        return;
+      }
+      const repoName = s.repo.split('/').pop() || s.repo;
+      ctx.text(1, 1, ('⎇ ' + s.branch).slice(0, W - 2), { fg: c.accent, bold: true });
+      ctx.text(Math.max(3, W - repoName.length - 1), 1, repoName.slice(0, W - 4), { fg: c.fgDim });
+      if (H >= 4) {
+        const line = s.clean
+          ? '✓ clean · ' + s.commitCount + ' commit' + (s.commitCount === 1 ? '' : 's')
+          : '● ' + s.changeCount + ' change' + (s.changeCount === 1 ? '' : 's')
+            + (s.staged.length ? ' (' + s.staged.length + ' staged)' : '');
+        ctx.text(1, 2, line.slice(0, W - 2), { fg: s.clean ? c.success : c.warning });
+      }
+      const b = s.clean ? '[ Open Git Desk ]' : '[ Review changes ]';
+      const by = H - 2;
+      ctx.text(1, by, b.slice(0, W - 2), { fg: c.success, bold: true });
+      w._gitBtn = { x: 1, y: by, w: Math.min(b.length, W - 2), action: 'open' };
+    },
+    onClick(lx, ly, w) {
+      const b = w._gitBtn;
+      if (b && ly === b.y && lx >= b.x && lx < b.x + b.w) {
+        if (_shellOpenApp) _shellOpenApp('gitdesk');
+        return true;
+      }
+      return false;
     },
   },
 };
@@ -958,6 +1007,30 @@ export function createShell(engine, opts = {}) {
       const ux = userChipX();
       engine.text(ux, y, chip, { fg: t.colors.bg, bg: t.colors[user.color] || t.colors.accent, bold: true });
     }
+
+    // Git branch + status chip (left of the user chip). Shows the active repo's
+    // branch and dirty count; click opens Git Desk. Hidden when no repo exists.
+    const gchip = gitChipText();
+    if (gchip) {
+      const gx = gitChipX();
+      const s = git.activeStatus();
+      const bg = s && !s.clean ? t.colors.warning : t.colors.border;
+      const fg = s && !s.clean ? t.colors.bg : t.colors.fg;
+      engine.text(gx, y, gchip, { fg, bg, bold: !!(s && !s.clean) });
+    }
+  }
+
+  // Taskbar git chip: " ⎇ <branch> ●N ". Empty string when there are no repos.
+  function gitChipText() {
+    git.changes.value; // subscribe so the taskbar repaints on git mutations
+    const s = git.activeStatus();
+    if (!s) return '';
+    const dirty = s.clean ? '' : ` ●${s.changeCount}`;
+    return ` ⎇ ${s.branch}${dirty} `;
+  }
+  function gitChipX() {
+    const chip = gitChipText();
+    return userChipX() - chip.length;
   }
 
   function userChipText() {
@@ -977,6 +1050,11 @@ export function createShell(engine, opts = {}) {
     if (user) {
       const ux = userChipX();
       if (px >= ux && px < ux + userChipText().length) return { kind: 'user' };
+    }
+    const gchip = gitChipText();
+    if (gchip) {
+      const gx = gitChipX();
+      if (px >= gx && px < gx + gchip.length) return { kind: 'git' };
     }
     let cur = ' FakanOS '.length + 1;
     for (const r of running.values()) {
@@ -1100,6 +1178,12 @@ export function createShell(engine, opts = {}) {
     return win;
   }
 
+  // Open Git Desk, optionally pointing it at the repo containing `path`.
+  function openGit(path) {
+    if (path) globalThis.__aciiGitRepo = path;
+    return openOrFocus('gitdesk');
+  }
+
   function setWallpaper(path) {
     wallpaperPath.value = path;
     bumpSave();
@@ -1195,6 +1279,17 @@ export function createShell(engine, opts = {}) {
             fs.mkdir(name);
           } },
         { label: 'Open Findman',   onSelect: () => openOrFocus('findman') },
+        { label: 'Git',
+          items: [
+            ...(git.isRepo('/desktop')
+              ? [{ label: 'Open Git Desk', onSelect: () => openGit('/desktop') }]
+              : [{ label: 'Initialize repo here', onSelect: () => {
+                    fs.mkdir('/desktop');
+                    try { git.init('/desktop'); openGit('/desktop'); } catch (err) { window.alert(err.message); }
+                  } }]),
+            { label: 'Open Git Desk…', onSelect: () => openGit() },
+          ],
+        },
         { type: 'separator' },
         { label: 'Background',
           items: Object.keys(PATTERNS).map(p => ({
@@ -1363,6 +1458,7 @@ export function createShell(engine, opts = {}) {
     if (e.type === 'mousedown' && e.button === 0) {
       const hit = taskbarHitTest(e.x, e.y);
       if (hit?.kind === 'user') { activeMenu.value = menuForUser(); return; }
+      if (hit?.kind === 'git') { openGit(); return; }
       if (hit?.kind === 'chip') { wm.toggleMinimize(hit.win.id); return; }
       // Start desktop drag only if NOT inside a window (WM handles its own drag)
       if (!pointInAnyWindow(e.x, e.y)) {
@@ -1516,6 +1612,7 @@ export function createShell(engine, opts = {}) {
     if (e.type === 'tap') {
       const hit = taskbarHitTest(e.x, e.y);
       if (hit?.kind === 'user') { activeMenu.value = menuForUser(); return; }
+      if (hit?.kind === 'git') { openGit(); return; }
       if (hit?.kind === 'chip') { wm.toggleMinimize(hit.win.id); return; }
     }
     const f = wm.focused.peek();

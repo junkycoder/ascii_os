@@ -192,6 +192,7 @@
         { createApp: createMediaMogul },
         { createApp: createGameMaker },
         { createApp: createTimetrack },
+        { createApp: createGitDesk },
         { createApp: createShare },
       ] = await Promise.all([
         import('./src/shell.js' + V),
@@ -204,12 +205,14 @@
         import('./src/apps/mediamogul.js' + V),
         import('./src/apps/gamemaker.js' + V),
         import('./src/apps/timetrack.js' + V),
+        import('./src/apps/gitdesk.js' + V),
         import('./src/apps/share.js' + V),
       ]);
 
       const appRegistry = [
         { id: 'readme',    label: 'README',    icon: '[?]', factory: createReadme },
         { id: 'findman',   label: 'Findman',   icon: '[▸]', factory: createFindman },
+        { id: 'gitdesk',   label: 'Git Desk',  icon: '[⎇]', factory: createGitDesk },
         { id: 'terminal',  label: 'Terminal',  icon: '[$]', factory: createTerminal },
         { id: 'notes',     label: 'Notes',     icon: '[≡]', factory: createNotes },
         { id: 'paint',     label: 'Paint',     icon: '[✎]', factory: createPaint },
