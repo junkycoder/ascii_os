@@ -255,8 +255,10 @@ export function createLogin(engine, opts = {}) {
       e.raw?.preventDefault?.();
       return;
     }
-    // Printable char into the focused field (no modifiers).
-    if (k && k.length === 1 && !e.ctrl && !e.meta && !e.alt) {
+    // Printable char into the focused field. Allow Alt/Option: on a macOS CZ
+    // keyboard '@' is Option+ě (Option+2) — altKey is set but e.key is the
+    // resolved symbol, so we must accept it. ctrl/meta stay blocked (shortcuts).
+    if (k && k.length === 1 && !e.ctrl && !e.meta) {
       const f = focusField();
       if (f === 'email') email += k;
       else if (f === 'username') username += k;
