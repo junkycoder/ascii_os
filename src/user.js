@@ -24,10 +24,19 @@ import { signal } from './signals.js';
 
 const STORAGE_KEY = 'acii.user.v1';
 
+// Touch devices default the on-screen keyboard ON; desktops default it OFF.
+function isTouchDevice() {
+  try {
+    return ('ontouchstart' in globalThis) ||
+           (globalThis.navigator && globalThis.navigator.maxTouchPoints > 0);
+  } catch { return false; }
+}
+
 // Known preferences with explicit defaults. New prefs added here get a default
 // and are exposed as `user.prefs.<key>` signals automatically.
 const PREF_DEFAULTS = {
   vimEnabled: false,
+  keyboardEnabled: isTouchDevice(), // on-screen touch keyboard (shell renders it)
   leaderKey: ' ', // space
   theme: null,    // null = follow system / shell default
   quicklook: true,
