@@ -1,10 +1,15 @@
 // media.js — adapters for images, video, and audio in the ASCII engine.
 //
-// Everything here is browser-side, zero deps. Brightness is mapped to a
-// charset ramp; colors are optional (rgb mode emits per-cell hex fg).
+// Everything here is browser-side, zero deps. Two render strategies live here:
+//   - `ascii`  — brightness → charset ramp (the original; one char per cell)
+//   - `half`   — ▀ half-block; top pixel = fg, bottom = bg → 2× vertical res,
+//                fully colored, still copyable text. The default for media.
+//   - `braille`— ⠿ 2×4 dot matrix; one mono color per cell, 8× pixel density.
+//                Best for small pixelart icons / line art.
 //
 // Cells produced by image/video sampling match the engine's draw API:
-//   { ch, fg } — pass straight to ctx.put(x, y, cell.ch, { fg: cell.fg }).
+//   { ch, fg }      — pass to ctx.put(x, y, cell.ch, { fg: cell.fg })
+//   { ch, fg, bg }  — half-block also carries bg: ctx.put(x,y,ch,{fg,bg})
 
 import { signal } from "./signals.js";
 
@@ -31,24 +36,50 @@ function toHex(r, g, b) {
   return "#" + n.toString(16).padStart(6, "0");
 }
 
-// Sample a drawable (HTMLImageElement / HTMLVideoElement / Canvas / ImageBitmap)
-// into a 2D array of { ch, fg } cells at the target terminal size.
-function sampleDrawable(drawable, { width, height, charset, color }) {
-  const ramp = charset || DEFAULT_CHARSET;
-  const last = ramp.length - 1;
-  const sw = width;
-  const sh = height * 2; // vertical oversample
+function lum601(r, g, b) {
+  // Perceived luminance (Rec. 601). Good enough for ramp/threshold picking.
+  return (r * 299 + g * 587 + b * 114) / 1000;
+}
 
-  const { canvas, ctx } = makeCanvas(sw, sh);
+// Per-mode source oversample factors [horizontal, vertical]. Each output cell
+// consumes fx×fy source pixels, so the canvas is drawn at width·fx × height·fy.
+const OVERSAMPLE = { ascii: [1, 2], half: [1, 2], braille: [2, 4] };
+
+// Braille dot bit per (col,row-in-cell). Unicode base U+2800; dots:
+//   1 4 / 2 5 / 3 6 / 7 8 → bits 0x01,0x08 / 0x02,0x10 / 0x04,0x20 / 0x40,0x80
+const BRAILLE_BITS = [
+  [0x01, 0x02, 0x04, 0x40], // col 0, rows 0..3
+  [0x08, 0x10, 0x20, 0x80], // col 1, rows 0..3
+];
+
+// Draw `drawable` into an offscreen canvas at the mode's oversampled size and
+// return the raw RGBA buffer + dimensions, so each mode can pack cells itself.
+function rasterize(drawable, width, height, mode) {
+  const [fx, fy] = OVERSAMPLE[mode] || OVERSAMPLE.ascii;
+  const sw = width * fx;
+  const sh = height * fy;
+  const { ctx } = makeCanvas(sw, sh);
   // Drop alpha onto the canvas bg so transparent pixels read as dark, not
   // garbage. drawImage is told to stretch into the full target rect.
   ctx.fillStyle = "#000";
   ctx.fillRect(0, 0, sw, sh);
   ctx.drawImage(drawable, 0, 0, sw, sh);
+  return { img: ctx.getImageData(0, 0, sw, sh).data, sw, sh };
+}
 
-  const img = ctx.getImageData(0, 0, sw, sh).data;
+// Sample a drawable (HTMLImageElement / HTMLVideoElement / Canvas / ImageBitmap)
+// into a 2D array of cells at the target terminal size, in the chosen `mode`.
+function sampleDrawable(drawable, { width, height, charset, color, mode = "ascii", threshold = 0.5 }) {
+  if (mode === "half") return sampleHalf(drawable, width, height);
+  if (mode === "braille") return sampleBraille(drawable, width, height, color, threshold);
+  return sampleAscii(drawable, width, height, charset, color);
+}
+
+function sampleAscii(drawable, width, height, charset, color) {
+  const ramp = charset || DEFAULT_CHARSET;
+  const last = ramp.length - 1;
+  const { img, sw } = rasterize(drawable, width, height, "ascii");
   const cells = new Array(height);
-
   for (let y = 0; y < height; y++) {
     const row = new Array(width);
     // Pick the vertically-averaged pair of source rows for this cell.
@@ -60,30 +91,85 @@ function sampleDrawable(drawable, { width, height, charset, color }) {
       const r = (img[i0] + img[i1]) >> 1;
       const g = (img[i0 + 1] + img[i1 + 1]) >> 1;
       const b = (img[i0 + 2] + img[i1 + 2]) >> 1;
-      // Perceived luminance (Rec. 601). Good enough for ramp picking.
-      const lum = (r * 299 + g * 587 + b * 114) / 1000;
-      const idx = Math.min(last, Math.max(0, Math.round((lum / 255) * last)));
+      const idx = Math.min(last, Math.max(0, Math.round((lum601(r, g, b) / 255) * last)));
       const ch = ramp[idx];
-      row[x] = color === "rgb"
-        ? { ch, fg: toHex(r, g, b) }
-        : { ch, fg: null };
+      row[x] = color === "rgb" ? { ch, fg: toHex(r, g, b) } : { ch, fg: null };
     }
     cells[y] = row;
   }
   return { width, height, cells };
 }
 
-// ─── Image → ASCII ──────────────────────────────────────────────────
+// ▀ (U+2580 UPPER HALF BLOCK): the glyph's ink is `fg` (top pixel), the cell
+// background is `bg` (bottom pixel). Two independently-colored pixels per cell.
+function sampleHalf(drawable, width, height) {
+  const { img, sw } = rasterize(drawable, width, height, "half");
+  const cells = new Array(height);
+  for (let y = 0; y < height; y++) {
+    const row = new Array(width);
+    for (let x = 0; x < width; x++) {
+      const it = ((y * 2) * sw + x) * 4;       // top source pixel
+      const ib = ((y * 2 + 1) * sw + x) * 4;    // bottom source pixel
+      row[x] = {
+        ch: "▀",
+        fg: toHex(img[it], img[it + 1], img[it + 2]),
+        bg: toHex(img[ib], img[ib + 1], img[ib + 2]),
+      };
+    }
+    cells[y] = row;
+  }
+  return { width, height, cells };
+}
+
+// ⠿ 2×4 braille: 8 sub-pixels per cell, lit when brighter than `threshold`
+// (0..1 of full luminance). One color per cell = the mean of the lit pixels;
+// `color:'mono'` drops the color so the cell takes the theme fg instead.
+function sampleBraille(drawable, width, height, color, threshold) {
+  const { img, sw } = rasterize(drawable, width, height, "braille");
+  const cut = Math.max(0, Math.min(1, threshold)) * 255;
+  const cells = new Array(height);
+  for (let y = 0; y < height; y++) {
+    const row = new Array(width);
+    for (let x = 0; x < width; x++) {
+      let code = 0, lr = 0, lg = 0, lb = 0, on = 0;
+      for (let dx = 0; dx < 2; dx++) {
+        for (let dy = 0; dy < 4; dy++) {
+          const sx = x * 2 + dx;
+          const sy = y * 4 + dy;
+          const i = (sy * sw + sx) * 4;
+          const r = img[i], g = img[i + 1], b = img[i + 2];
+          if (lum601(r, g, b) >= cut) {
+            code |= BRAILLE_BITS[dx][dy];
+            lr += r; lg += g; lb += b; on++;
+          }
+        }
+      }
+      const ch = String.fromCharCode(0x2800 + code);
+      const fg = (color === "mono" || on === 0)
+        ? null
+        : toHex((lr / on) | 0, (lg / on) | 0, (lb / on) | 0);
+      row[x] = { ch, fg };
+    }
+    cells[y] = row;
+  }
+  return { width, height, cells };
+}
+
+// ─── Image → cells ──────────────────────────────────────────────────
 // Accepts a URL string, a Blob, or anything URL.createObjectURL can swallow.
+// `mode` picks the render strategy ('ascii' | 'half' | 'braille').
 // Returns a Promise so we can await image decode.
-export async function imageToAscii(srcUrlOrBlob, opts = {}) {
+export async function imageToCells(srcUrlOrBlob, opts = {}) {
   const { width, height } = opts;
   if (!width || !height) {
-    throw new Error("imageToAscii: width and height are required");
+    throw new Error("imageToCells: width and height are required");
   }
   const img = await loadImage(srcUrlOrBlob);
   return sampleDrawable(img, opts);
 }
+
+// Back-compat alias — original name, defaults to the ramp ('ascii') strategy.
+export const imageToAscii = imageToCells;
 
 function loadImage(src) {
   return new Promise((res, rej) => {
@@ -108,7 +194,7 @@ function loadImage(src) {
 // receive the same { cells } shape as imageToAscii so renderers can be
 // shared. Caller is responsible for calling destroy() when done.
 export function createVideoPlayer(opts) {
-  const { src, width, height, charset, color = "mono", fps = 15,
+  const { src, width, height, charset, color = "mono", mode = "ascii", fps = 15,
           muted = true, volume = 1 } = opts;
   if (!src) throw new Error("createVideoPlayer: src required");
   if (!width || !height) {
@@ -143,7 +229,7 @@ export function createVideoPlayer(opts) {
       // readyState >= 2 means we have current frame data we can paint.
       if (video.readyState < 2) return;
       currentTime.value = video.currentTime;
-      const sampled = sampleDrawable(video, { width, height, charset, color });
+      const sampled = sampleDrawable(video, { width, height, charset, color, mode });
       for (const h of frameHandlers) h(sampled.cells);
     }, interval);
   }
