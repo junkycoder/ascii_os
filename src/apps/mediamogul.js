@@ -145,9 +145,11 @@ export function createApp(initialCtx, win) {
 
   // ── Blob URL bookkeeping ─────────────────────────────────────────────
   const blobUrls = new Set();
-  function makeBlobUrl(path) {
+  async function makeBlobUrl(path) {
     try {
-      const bytes = fs.readBytes(path);          // ArrayBuffer
+      // Async read so mounted-local files (File System Access) work — sync
+      // readBytes only sees the in-memory cache and fails for cold mounts.
+      const bytes = await fs.readBytesAsync(path);  // ArrayBuffer
       const blob = new Blob([bytes], { type: mimeForPath(path) });
       const u = URL.createObjectURL(blob);
       blobUrls.add(u);
@@ -323,7 +325,7 @@ export function createApp(initialCtx, win) {
     teardownAudio();
   }
 
-  function loadMedia(path) {
+  async function loadMedia(path) {
     if (!fs.exists(path)) { loadError = 'File not found: ' + path; return; }
     const kind = mediaKind(path);
     if (!kind) { loadError = 'Unsupported file: ' + path; return; }
@@ -340,13 +342,15 @@ export function createApp(initialCtx, win) {
       imageReqW = 0; imageReqH = 0;
       imageLoading = false;
     } else if (kind === 'video') {
-      const u = makeBlobUrl(path);
+      const u = await makeBlobUrl(path);
+      if (loadedPath !== path) { if (u) revokeBlob(u); return; } // selection moved on
       if (!u) { loadError = loadError || 'could not read video'; return; }
       playerSrc = u;
       // Player spawned in render once we know the canvas dims.
       setStatus('loading video…');
     } else if (kind === 'audio') {
-      const u = makeBlobUrl(path);
+      const u = await makeBlobUrl(path);
+      if (loadedPath !== path) { if (u) revokeBlob(u); return; } // selection moved on
       if (!u) { loadError = loadError || 'could not read audio'; return; }
       try {
         if (!audio) audio = createAudio();
@@ -407,7 +411,8 @@ export function createApp(initialCtx, win) {
     const reqPath = loadedPath;
     try {
       if (!imageSrcUrl) {
-        const u = makeBlobUrl(reqPath);
+        const u = await makeBlobUrl(reqPath);
+        if (loadedPath !== reqPath) { if (u) revokeBlob(u); imageLoading = false; return; }
         if (!u) { imageLoading = false; return; }
         imageSrcUrl = u;
       }
