@@ -94,10 +94,10 @@ export function createApp(initialCtx, win) {
     },
     onTouch(e) {
       // Map touch gestures to scroll — the markdown view itself only knows
-      // about wheel/click, so we translate here.
-      if (e.type === "swipe") {
-        if (e.dir === "up") md.scroll(3);
-        else if (e.dir === "down") md.scroll(-3);
+      // about wheel/click, so we translate here. Drag tracks the finger 1:1
+      // (content follows finger): drag down → earlier lines, drag up → later.
+      if (e.type === "move") {
+        if (e.sy) md.scroll(-e.sy);
       } else if (e.type === "tap") {
         // Synthesize a click so link hit-testing fires.
         md.onMouse({ type: "click", x: e.x, y: e.y, button: 0 });
