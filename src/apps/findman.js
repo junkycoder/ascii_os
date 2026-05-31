@@ -22,6 +22,7 @@ import { createVim } from '../vim.js';
 import { createUser } from '../user.js';
 import { langForPath, highlight, roleColor } from '../syntax.js';
 import { createMarkdownView } from '../markdown.js';
+import { imageToCells } from '../media.js';
 
 const SAVE_FLASH_MS = 1000;
 
@@ -78,6 +79,22 @@ function isTextPath(path) {
   return TEXT_EXT.has(path.slice(i + 1).toLowerCase());
 }
 
+// Raster images Findman previews as a half-block picture instead of the plain
+// "binary, N bytes" placeholder. (svg is text → handled by the editor; ico is
+// skipped — multi-size decode is fiddly and adds little.)
+const IMAGE_EXT = new Set(['png', 'jpg', 'jpeg', 'gif', 'bmp', 'webp', 'avif']);
+function extOf(path) {
+  const i = path.lastIndexOf('.');
+  return i < 0 ? '' : path.slice(i + 1).toLowerCase();
+}
+function isImagePath(path) { return IMAGE_EXT.has(extOf(path)); }
+function mimeForName(name) {
+  return ({
+    png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif',
+    bmp: 'image/bmp', webp: 'image/webp', avif: 'image/avif',
+  })[extOf(name)] || 'application/octet-stream';
+}
+
 export function createApp(initialCtx, win) {
   const fs = getFS(win);
   const sessionQuote = pickQuote();
@@ -109,6 +126,16 @@ export function createApp(initialCtx, win) {
   let editorCol = 0;
   let editorScrollY = 0;
   let editorDirty = false;
+
+  // ── Image preview state (half-block render of raster files) ─────────
+  // Cached cells for the currently-previewed image; re-rendered when the path
+  // or the available pane size changes. imgUrl is the live blob URL to revoke.
+  let imgCells = null;
+  let imgForPath = null;
+  let imgReqW = 0, imgReqH = 0;
+  let imgLoading = false;
+  let imgError = null;
+  let imgUrl = null;
 
   // Syntax-highlight cache: re-tokenize only when the buffer text or language
   // changes. rows = Array<Array<{text, role}>> (one entry per source line).
@@ -381,6 +408,43 @@ export function createApp(initialCtx, win) {
       flashTimer = setTimeout(() => { savedFlash.value = false; flashTimer = null; }, SAVE_FLASH_MS);
     } catch (e) {
       editorLoadError = String(e && e.message || e);
+    }
+  }
+
+  // Decode the selected raster file and sample it to half-block cells that fit
+  // `W × availH` cells while preserving aspect. A half-block sub-pixel is ~square
+  // on screen, so the pixel grid is W × (availH·2); we scale the image into it.
+  async function ensureImagePreview(path, W, availH) {
+    if (W <= 0 || availH <= 0 || imgLoading) return;
+    if (imgCells && imgForPath === path && imgReqW === W && imgReqH === availH) return;
+    imgLoading = true;
+    const reqPath = path;
+    try {
+      const bytes = fs.readBytes(path);            // ArrayBuffer
+      const blob = new Blob([bytes], { type: mimeForName(path) });
+      if (imgUrl) { try { URL.revokeObjectURL(imgUrl); } catch (_) {} imgUrl = null; }
+      imgUrl = URL.createObjectURL(blob);
+      const dim = await new Promise((res, rej) => {
+        const im = new Image();
+        im.onload = () => res({ w: im.naturalWidth || 1, h: im.naturalHeight || 1 });
+        im.onerror = () => rej(new Error('decode failed'));
+        im.src = imgUrl;
+      });
+      const scale = Math.min(W / dim.w, (availH * 2) / dim.h);
+      const wc = Math.max(1, Math.min(W, Math.round(dim.w * scale)));
+      const hc = Math.max(1, Math.min(availH, Math.ceil(dim.h * scale / 2)));
+      const out = await imageToCells(imgUrl, { width: wc, height: hc, mode: 'half' });
+      if (editorPath === reqPath) {
+        imgCells = out.cells; imgForPath = reqPath; imgError = null;
+        imgReqW = W; imgReqH = availH;
+      }
+    } catch (e) {
+      if (editorPath === reqPath) {
+        imgError = String(e && e.message || e); imgCells = null;
+        imgForPath = reqPath; imgReqW = W; imgReqH = availH;
+      }
+    } finally {
+      imgLoading = false;
     }
   }
 
@@ -811,6 +875,30 @@ export function createApp(initialCtx, win) {
       return;
     }
     if (editorBinarySize >= 0) {
+      if (isImagePath(editorPath)) {
+        const picH = Math.max(1, innerH - 1);          // reserve a caption row
+        ensureImagePreview(editorPath, innerW, picH);   // async; fills imgCells
+        if (imgError && imgForPath === editorPath) {
+          ctx.text(innerX, innerY, ('image: ' + imgError).slice(0, innerW), { fg: C.error, bg: C.bg });
+        } else if (imgCells && imgForPath === editorPath) {
+          const ph = imgCells.length;
+          const pw = imgCells[0] ? imgCells[0].length : 0;
+          const ox = innerX + Math.max(0, Math.floor((innerW - pw) / 2));
+          const oy = innerY + Math.max(0, Math.floor((picH - ph) / 2));
+          for (let yy = 0; yy < ph; yy++) {
+            const row = imgCells[yy];
+            for (let xx = 0; xx < row.length && xx < innerW; xx++) {
+              const cell = row[xx];
+              ctx.put(ox + xx, oy + yy, cell.ch, { fg: cell.fg, bg: cell.bg });
+            }
+          }
+          const cap = `${editorPath.split('/').pop()} · ${editorBinarySize} B · half-block`;
+          ctx.text(innerX, innerY + innerH - 1, cap.slice(0, innerW), { fg: C.fgDim, bg: C.bg });
+        } else {
+          ctx.text(innerX, innerY, 'rendering image…', { fg: C.fgDim, bg: C.bg });
+        }
+        return;
+      }
       const msg = `binary, ${editorBinarySize} bytes`;
       ctx.text(innerX, innerY, msg.slice(0, innerW), { fg: C.fgDim, bg: C.bg });
       return;
@@ -1349,6 +1437,7 @@ export function createApp(initialCtx, win) {
       if (blinkInterval) clearInterval(blinkInterval);
       if (typeof unsubFS === 'function') unsubFS();
       if (typeof unsubUser === 'function') unsubUser();
+      if (imgUrl) { try { URL.revokeObjectURL(imgUrl); } catch (_) {} imgUrl = null; }
     },
   };
 }
