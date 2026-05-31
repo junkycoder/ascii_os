@@ -494,16 +494,15 @@ export function createApp(initialCtx, win) {
 
   function onMouse(e) {
     if (e.type === 'wheel') {
-      // wheel: positive deltaY = scroll down → reduce offset.
-      const step = e.deltaY > 0 ? -2 : 2;
-      scrollOffset = Math.max(0, scrollOffset + step);
+      // wheel down (lines > 0) = toward newest → reduce offset.
+      scrollOffset = Math.max(0, scrollOffset - (e.lines || 0));
     }
   }
 
   function onTouch(e) {
-    if (e.type === 'swipe') {
-      if (e.dir === 'down') scrollOffset = Math.max(0, scrollOffset - 3);
-      else if (e.dir === 'up') scrollOffset += 3;
+    // Drag tracks the finger: pull down (sy > 0) reveals older scrollback.
+    if (e.type === 'move' && e.sy) {
+      scrollOffset = Math.max(0, scrollOffset + e.sy);
     }
   }
 

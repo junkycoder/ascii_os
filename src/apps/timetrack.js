@@ -361,7 +361,7 @@ export function createApp(initialCtx, win) {
 
     onMouse(e) {
       if (e.type === 'wheel') {
-        listScroll = Math.max(0, listScroll + (e.deltaY > 0 ? 1 : -1));
+        listScroll = Math.max(0, listScroll + (e.lines || 0));
         return;
       }
       if (e.type !== 'click' && e.type !== 'mousedown') return;
@@ -380,6 +380,8 @@ export function createApp(initialCtx, win) {
     },
 
     onTouch(e) {
+      // Drag scrolls the summary list, content following the finger.
+      if (e.type === 'move' && e.sy) { listScroll = Math.max(0, listScroll - e.sy); return; }
       if (e.type !== 'tap') return;
       this.onMouse({ type: 'click', x: e.x, y: e.y, button: 0 });
     },

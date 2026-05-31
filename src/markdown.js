@@ -606,7 +606,7 @@ export function createMarkdownView(opts = {}) {
 
   function onMouse(e) {
     if (e.type === "wheel") {
-      scroll(e.deltaY > 0 ? 3 : -3);
+      scroll(e.lines || 0);
       return;
     }
     if (e.type === "click") {

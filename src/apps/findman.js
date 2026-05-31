@@ -1159,7 +1159,7 @@ export function createApp(initialCtx, win) {
       if (e.type === 'wheel') {
         if (mdPreviewActive() && mdView) {
           if (mdView.onMouse) mdView.onMouse(e);
-          else if (mdView.scroll) mdView.scroll(e.deltaY > 0 ? 3 : -3);
+          else if (mdView.scroll) mdView.scroll(e.lines || 0);
         }
         return;
       }
@@ -1261,21 +1261,18 @@ export function createApp(initialCtx, win) {
         this.onMouse({ type: 'click', x: e.x, y: e.y });
       } else if (e.type === 'doubletap') {
         this.onMouse({ type: 'dblclick', x: e.x, y: e.y });
-      } else if (e.type === 'swipe') {
+      } else if (e.type === 'move' && e.sy) {
+        // Drag tracks the finger 1:1 (content follows finger). Route to whatever
+        // surface is active: tree selection, markdown preview, or the editor.
+        const step = e.sy; // cells moved this frame (down > 0)
         if (focus === 'tree') {
-          if (e.dir === 'up') moveSelection(3);
-          else if (e.dir === 'down') moveSelection(-3);
+          moveSelection(-step);
         } else if (mdPreviewActive() && mdView) {
-          if (mdView.scroll) mdView.scroll(e.dir === 'up' ? 3 : -3);
+          if (mdView.scroll) mdView.scroll(-step);
         } else {
           const lines = vim ? vim.lines : editorLines;
-          if (e.dir === 'up') {
-            const ny = Math.min(lines.length - 1, (vim ? vim.cursor.y : editorRow) + 3);
-            if (vim) { vim.cursor.y = ny; } else { editorRow = ny; clampCaret(); }
-          } else if (e.dir === 'down') {
-            const ny = Math.max(0, (vim ? vim.cursor.y : editorRow) - 3);
-            if (vim) { vim.cursor.y = ny; } else { editorRow = ny; clampCaret(); }
-          }
+          const ny = Math.max(0, Math.min(lines.length - 1, (vim ? vim.cursor.y : editorRow) - step));
+          if (vim) { vim.cursor.y = ny; } else { editorRow = ny; clampCaret(); }
         }
       }
     },
