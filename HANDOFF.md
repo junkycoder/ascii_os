@@ -3,6 +3,15 @@
 Running log of what works and what's still open. Pair with `CLAUDE.md` /
 `AGENTS.md` (project rules + conventions) and `README.md` (the map).
 
+> **Repo state — clean desk (2026-05-31).** `trunk` is the single source of
+> truth and everything documented below is merged into it; **there are no open
+> PRs** and all merged feature branches (local + remote) have been pruned. Two
+> experiments are intentionally parked **outside** trunk and are *not* reflected
+> below: branches `claude/practical-chandrasekhar-425fe9` and
+> `claude/zealous-antonelli-a8395f` (each still has a worktree), plus a local-only
+> `cleanup/remove-test-comment` holding an unpushed paint undo/redo + region
+> copy/paste/clone experiment. Land or delete those when you get to them.
+
 ## Where things stand (DONE & working)
 
 Verified functional end-to-end:
