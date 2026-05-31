@@ -1211,9 +1211,55 @@ export function createShell(engine, opts = {}) {
     } catch (err) { window.alert(err.message); }
   }
 
+  // Clone a public GitHub repo via the worker/devserver proxy (/api/git/clone),
+  // pour the returned files into the virtual FS, and open it in Git Desk.
+  async function cloneRepo() {
+    const spec = window.prompt('GitHub repozitář (owner/name nebo URL):', '');
+    if (!spec || !spec.trim()) return;
+    const m = spec.trim().match(/([^/:\s]+?)(?:\.git)?(?:[/#?].*)?$/);
+    const guess = (m && m[1]) || 'repo';
+    const destInput = window.prompt('Cílová složka:', '/desktop/' + guess);
+    if (!destInput) return;
+    const dest = '/' + destInput.replace(/^\/+|\/+$/g, '');
+    if (dest === '/') { window.alert('Zadej složku, ne kořen /.'); return; }
+    if (fs.exists(dest)) { window.alert('Cesta už existuje: ' + dest); return; }
+    // Token (for private repos) goes in a header, never the URL.
+    const fetchClone = async (token) => {
+      const headers = token ? { 'X-Git-Token': token } : {};
+      const r = await fetch('/api/git/clone?repo=' + encodeURIComponent(spec.trim()), { headers });
+      let d = {}; try { d = await r.json(); } catch {}
+      return { res: r, data: d };
+    };
+    try {
+      let { res, data } = await fetchClone(null);
+      // 404 = not found OR private. Offer a token and retry once.
+      if (res.status === 404) {
+        const tok = window.prompt(
+          'Repo nenalezeno, nebo je privátní.\n\n' +
+          'Pro privátní repo vlož GitHub token (Personal Access Token).\n' +
+          'Vytvoř ho zde (zaškrtni scope „repo“):\n' +
+          'https://github.com/settings/tokens/new?scopes=repo&description=FakanOS\n\n' +
+          'Token (prázdné = zrušit):', '');
+        if (!tok || !tok.trim()) return;
+        ({ res, data } = await fetchClone(tok.trim()));
+      }
+      if (!res.ok) throw new Error((data && (data.detail || data.error)) || ('HTTP ' + res.status));
+      const files = (data.files || []).map(f => ({
+        path: f.path,
+        data: Uint8Array.from(atob(f.b64), c => c.charCodeAt(0)),
+      }));
+      git.clone(dest, files, { message: 'Clone ' + (data.repo || spec.trim()) + '@' + (data.ref || 'default') });
+      git.setActive(dest);
+      if (data.skipped) window.alert('Naklonováno (vynecháno ' + data.skipped + ' velkých souborů).');
+      openGit(dest);
+    } catch (err) {
+      window.alert('Klonování selhalo: ' + err.message);
+    }
+  }
+
   // Git submenu: one entry per existing repo (each opens Git Desk pointed at
-  // it), then "Add repository…". A repo is just a folder, so any number of them
-  // can live side by side under the virtual FS.
+  // it), then "Clone…" / "Add repository…". A repo is just a folder, so any
+  // number of them can live side by side under the virtual FS.
   function gitMenuItems() {
     const repos = git.listRepos();
     const items = repos.map(r => ({
@@ -1221,6 +1267,7 @@ export function createShell(engine, opts = {}) {
       onSelect: () => openGit(r),
     }));
     if (repos.length) items.push({ type: 'separator' });
+    items.push({ label: 'Clone from GitHub…', onSelect: cloneRepo });
     items.push({ label: 'Add repository…', onSelect: addRepo });
     return items;
   }

@@ -67,6 +67,7 @@ export default {
     if (path === '/api/feedback' || path.startsWith('/api/feedback/')) return handleFeedback(request, env, url);
     if (path.startsWith('/api/share/')) return handleShare(request, env, url);
     if (path.startsWith('/api/collab/')) return handleCollab(request, env, url);
+    if (path === '/api/git/clone') return handleGitClone(request, env, url);
     if (path === '/.well-known/apple-app-site-association') return aasa(env);
     if (path === '/auth') return serveApp(request, env);          // universal-link landing
     if (path.startsWith(NEWFISH_PREFIX)) return proxyNewfish(request, url);
@@ -990,6 +991,122 @@ function aasa(env) {
   return new Response(JSON.stringify(body), {
     headers: { 'content-type': 'application/json', 'cache-control': 'no-store' },
   });
+}
+
+// ── /api/git/clone — shallow clone a public GitHub repo ─────────────
+//   GET /api/git/clone?repo=<owner/name | github URL>&ref=<branch|tag|sha>
+// Fetches the repo tarball from GitHub (one request — no per-file rate hit),
+// gunzips + parses the tar in-worker, and returns the file set as base64 so
+// the client can pour it into the virtual FS. Public repos only (no auth);
+// capped to keep the in-memory FS sane.
+const GIT_CLONE_MAX_FILES = 4000;
+const GIT_CLONE_MAX_TOTAL = 16 * 1024 * 1024; // 16 MiB decompressed
+const GIT_CLONE_MAX_FILE = 1024 * 1024;       // 1 MiB per file
+
+function parseRepoSpec(spec) {
+  spec = String(spec || '').trim();
+  if (!spec) return null;
+  let m = spec.match(/github\.com[/:]([^/\s]+)\/([^/\s]+?)(?:\.git)?(?:[/#?].*)?$/i);
+  if (m) return { owner: m[1], repo: m[2] };
+  m = spec.match(/^([^/\s]+)\/([^/\s]+?)(?:\.git)?$/);
+  if (m) return { owner: m[1], repo: m[2] };
+  return null;
+}
+
+// Minimal tar reader: regular files only, with ustar `prefix`, GNU long names
+// ('L'), and pax extended headers ('x' → path=…). Returns [{ name, bytes }].
+function parseTar(buf) {
+  const td = new TextDecoder();
+  const str = (o, len) => td.decode(buf.subarray(o, o + len)).replace(/\0.*$/s, '');
+  const paxPath = (data) => {
+    const text = td.decode(data);
+    let i = 0;
+    while (i < text.length) {
+      const sp = text.indexOf(' ', i);
+      if (sp < 0) break;
+      const len = parseInt(text.slice(i, sp), 10);
+      if (!len) break;
+      const rec = text.slice(sp + 1, i + len).replace(/\n$/, '');
+      const eq = rec.indexOf('=');
+      if (eq > 0 && rec.slice(0, eq) === 'path') return rec.slice(eq + 1);
+      i += len;
+    }
+    return null;
+  };
+  const files = [];
+  let off = 0, override = null;
+  while (off + 512 <= buf.length) {
+    let zero = true;
+    for (let i = 0; i < 512 && zero; i++) if (buf[off + i] !== 0) zero = false;
+    if (zero) break;
+    let name = str(off, 100);
+    const prefix = str(off + 345, 155);
+    if (prefix) name = prefix + '/' + name;
+    const size = parseInt(str(off + 124, 12).trim(), 8) || 0;
+    const type = String.fromCharCode(buf[off + 156]);
+    off += 512;
+    const data = buf.subarray(off, off + size);
+    off += Math.ceil(size / 512) * 512;
+    if (type === 'x' || type === 'X') { const p = paxPath(data); if (p) override = p; continue; }
+    if (type === 'L') { override = td.decode(data).replace(/\0.*$/s, ''); continue; }
+    if (type === 'g') continue; // global pax header — ignore
+    if (override) { name = override; override = null; }
+    if (type === '0' || type === '\0' || type === '') files.push({ name, bytes: data.slice() });
+  }
+  return files;
+}
+
+function bytesToB64(bytes) {
+  let s = '';
+  const C = 0x8000;
+  for (let i = 0; i < bytes.length; i += C) s += String.fromCharCode.apply(null, bytes.subarray(i, i + C));
+  return btoa(s);
+}
+
+async function handleGitClone(request, env, url) {
+  const parsed = parseRepoSpec(url.searchParams.get('repo'));
+  if (!parsed) return json({ error: 'bad repo; use owner/name or a github.com URL' }, 400);
+  const ref = (url.searchParams.get('ref') || '').trim();
+  const tarUrl = `https://api.github.com/repos/${parsed.owner}/${parsed.repo}/tarball/${encodeURIComponent(ref)}`;
+  const headers = { 'user-agent': 'FakanOS', 'accept': 'application/vnd.github+json' };
+  // Token (for private repos) rides a header — never the query string. A
+  // client-supplied token wins over the optional server-side GITHUB_TOKEN.
+  // It is used only for this fetch and never stored or logged.
+  const token = (request.headers.get('x-git-token') || '').trim() || (env && env.GITHUB_TOKEN) || '';
+  if (token) headers.authorization = 'Bearer ' + token;
+
+  let up;
+  try { up = await fetch(tarUrl, { headers }); }
+  catch (e) { return json({ error: 'github fetch failed', detail: String(e) }, 502); }
+  if (!up.ok || !up.body) {
+    const detail = up.status === 404 ? 'repo or ref not found — private repos need a token with repo scope'
+      : up.status === 401 ? 'bad or expired token'
+      : up.status === 403 ? 'github rate limit — try later' : '';
+    const status = (up.status === 404 || up.status === 401) ? up.status : 502;
+    return json({ error: `github ${up.status}`, detail }, status);
+  }
+
+  let tar;
+  try { tar = new Uint8Array(await new Response(up.body.pipeThrough(new DecompressionStream('gzip'))).arrayBuffer()); }
+  catch (e) { return json({ error: 'gunzip failed', detail: String(e) }, 502); }
+
+  let entries;
+  try { entries = parseTar(tar); }
+  catch (e) { return json({ error: 'tar parse failed', detail: String(e) }, 502); }
+
+  const files = [];
+  let total = 0, skipped = 0;
+  for (const e of entries) {
+    const slash = e.name.indexOf('/');           // strip GitHub's "<owner>-<repo>-<sha>/" prefix
+    const rel = slash >= 0 ? e.name.slice(slash + 1) : '';
+    if (!rel) continue;
+    if (e.bytes.length > GIT_CLONE_MAX_FILE) { skipped++; continue; }
+    if (files.length >= GIT_CLONE_MAX_FILES || total + e.bytes.length > GIT_CLONE_MAX_TOTAL) { skipped++; continue; }
+    total += e.bytes.length;
+    files.push({ path: rel, b64: bytesToB64(e.bytes) });
+  }
+
+  return json({ repo: `${parsed.owner}/${parsed.repo}`, ref: ref || 'default', files, skipped });
 }
 
 // ── New Fish time-tracker proxy (unchanged) ─────────────────────────
