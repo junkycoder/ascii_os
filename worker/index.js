@@ -18,6 +18,8 @@
 //   env.IOS_TEAM_ID     Apple Team ID for the AASA appID (set when known)
 //   env.RESEND_API_KEY  secret — `wrangler secret put RESEND_API_KEY`
 
+import { isSafeRel } from '../src/pathsafe.js';
+
 const NEWFISH_PREFIX = '/api/newfish/';
 const NEWFISH_UPSTREAM = 'https://new-fish.net/api/v0/';
 
@@ -51,6 +53,10 @@ const SHARE_MAX_TOTAL = 8 * 1024 * 1024; // 8 MiB total per room (soft cap)
 // join the room and boot into it. The CollabRoom DO holds the member list and
 // the live presence (who's here + cursors) over a WebSocket.
 const COLLAB_INVITE_TTL = 60 * 60 * 24 * 7; // invite link valid 7 days, single use
+
+// Hard cap on concurrent presence/sync sockets per room (both DOs) — keeps one
+// room from exhausting the runtime's socket budget.
+const MAX_PEERS = 32;
 
 export default {
   async fetch(request, env) {
@@ -93,6 +99,44 @@ async function sha256hex(s) {
 }
 function isEmail(s) { return /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(String(s || '').trim()); }
 
+// Caller IP for per-IP throttling. Cloudflare always sets cf-connecting-ip.
+function clientIp(request) {
+  return request.headers.get('cf-connecting-ip') || '';
+}
+
+// Best-effort per-IP rate limit over KV. KV is eventually consistent, so this is
+// a speed bump (a burst inside the replication window can slip through), not a
+// hard quota — enough to stop trivial scripted abuse of the unauthenticated
+// endpoints (link verify/peek, share-room minting, socket opens). Allows the
+// call when there's no KV or no IP (fail-open: never lock out a legit user).
+async function rateLimit(env, bucket, ip, { ttl, max = 1 }) {
+  if (!env.AUTH || !ip) return true;
+  const key = 'rl:' + bucket + ':' + ip;
+  const n = Number(await env.AUTH.get(key)) || 0;
+  if (n >= max) return false;
+  await env.AUTH.put(key, String(n + 1), { expirationTtl: ttl });
+  return true;
+}
+
+// Serve a stored room file defensively. Files are uploaded by one peer and
+// streamed back from our own origin (os.fakan.cz), where the session token
+// lives in localStorage — so an uploaded `evil.html`/`evil.svg` served with its
+// original content-type would run as same-origin script and exfiltrate it.
+// Force a benign content-type for any active type, forbid MIME sniffing, and
+// mark the body as a download so a browser never renders it inline.
+function safeFileResponse(data, mime) {
+  let ct = String(mime || 'application/octet-stream');
+  if (/html|svg|xml|javascript|xhtml/i.test(ct)) ct = 'text/plain; charset=utf-8';
+  return new Response(data, {
+    headers: {
+      'content-type': ct,
+      'x-content-type-options': 'nosniff',
+      'content-disposition': 'attachment',
+      'cache-control': 'no-store',
+    },
+  });
+}
+
 // The SPA lives at "/"; serve it for the universal-link landing path too.
 function serveApp(request, env) {
   const u = new URL(request.url);
@@ -134,6 +178,9 @@ async function sessionFor(env, sid) {
 // token holder is the person the link was emailed to, so it's fine to tell them
 // whether their address already has an account.
 async function authPeek(request, env) {
+  if (!(await rateLimit(env, 'peek', clientIp(request), { ttl: 60, max: 20 }))) {
+    return json({ error: 'too many requests' }, 429);
+  }
   const body = await readJSON(request);
   const token = String((body && body.token) || '').trim();
   if (!token) return json({ error: 'missing token' }, 400);
@@ -190,6 +237,9 @@ async function authRequest(request, env) {
 // boots into it. "Registration only if new": a nick (from the invite or this
 // request) seeds a BRAND-NEW account only — an existing user keeps their name.
 async function authVerify(request, env) {
+  if (!(await rateLimit(env, 'verify', clientIp(request), { ttl: 60, max: 20 }))) {
+    return json({ error: 'too many requests' }, 429);
+  }
   const body = await readJSON(request);
   const token = String((body && body.token) || '').trim();
   const nick = String((body && body.nick) || '').trim().slice(0, 16);
@@ -408,7 +458,22 @@ async function handleShare(request, env, url) {
 
   const rest = url.pathname.slice('/api/share/'.length);
   if (rest === 'new' && request.method === 'POST') {
-    return json({ code: shareCode() });
+    if (!(await rateLimit(env, 'share-new', clientIp(request), { ttl: 60, max: 20 }))) {
+      return json({ error: 'too many requests' }, 429);
+    }
+    // Mint the room code AND a per-room write secret. The code is the read
+    // capability (anyone with it can join + pull); the write token is needed to
+    // PUT/DELETE, so a joiner who only has the code/link is read-only. Seed the
+    // DO with the token so it can enforce writes from the very first upload.
+    const code = shareCode();
+    const writeToken = randToken();
+    const stub = env.SHARE.get(env.SHARE.idFromName(code));
+    await stub.fetch('https://share/init', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ writeToken }),
+    });
+    return json({ code, token: writeToken });
   }
 
   const slash = rest.indexOf('/');
@@ -416,6 +481,11 @@ async function handleShare(request, env, url) {
   const action = slash < 0 ? '' : rest.slice(slash + 1);
   if (!isShareCode(code)) return json({ error: 'bad code' }, 400);
   if (!action) return json({ error: 'no action' }, 404);
+
+  // Throttle socket opens per IP so the live-sync endpoint can't be hammered.
+  if (action === 'ws' && !(await rateLimit(env, 'share-ws', clientIp(request), { ttl: 60, max: 60 }))) {
+    return json({ error: 'too many requests' }, 429);
+  }
 
   // Address the one Durable Object for this code; forward the rest verbatim so
   // the DO can route on `action` and read ?path= / the WebSocket upgrade.
@@ -451,14 +521,38 @@ export class ShareRoom {
     const action = url.pathname.split('/').filter(Boolean)[0] || '';
     const path = url.searchParams.get('path') || '';
 
+    if (action === 'init') return this.init(request);
     if (action === 'ws') return this.handleWs(request);
     if (action === 'manifest') return this.manifest();
     if (action === 'file') {
       if (request.method === 'GET') return this.getFile(path);
-      if (request.method === 'PUT') return this.putFile(path, request);
-      if (request.method === 'DELETE') return this.delFile(path);
+      // Writes need the per-room write token (read stays open by code).
+      if (request.method === 'PUT' || request.method === 'DELETE') {
+        if (!(await this.canWrite(request))) return json({ error: 'read-only: write token required' }, 403);
+        if (request.method === 'PUT') return this.putFile(path, request);
+        return this.delFile(path);
+      }
     }
     return json({ error: 'not found' }, 404);
+  }
+
+  // Store the per-room write secret minted by /api/share/new. Idempotent and
+  // first-write-wins so a later guess can't rotate it.
+  async init(request) {
+    const b = await request.json().catch(() => null);
+    if (b && b.writeToken && !(await this.state.storage.get('writeToken'))) {
+      await this.state.storage.put('writeToken', String(b.writeToken));
+    }
+    return json({ ok: true });
+  }
+
+  // A request may write iff it carries the room's write token. Fail closed: if
+  // the room never stored a token, no one can write to it.
+  async canWrite(request) {
+    const want = await this.state.storage.get('writeToken');
+    if (!want) return false;
+    const got = request.headers.get('x-share-token') || '';
+    return got === want;
   }
 
   // ── files ──────────────────────────────────────────────────────
@@ -476,17 +570,15 @@ export class ShareRoom {
   }
 
   async getFile(path) {
-    if (!path) return json({ error: 'no path' }, 400);
+    if (!isSafeRel(path)) return json({ error: 'bad path' }, 400);
     const f = await this.state.storage.get('file:' + path);
     if (!f) return json({ error: 'not found' }, 404);
     // data is a string (text) or an ArrayBuffer (binary) — both valid bodies.
-    return new Response(f.data, {
-      headers: { 'content-type': f.mime || 'application/octet-stream', 'cache-control': 'no-store' },
-    });
+    return safeFileResponse(f.data, f.mime);
   }
 
   async putFile(path, request) {
-    if (!path || path.length > 1024) return json({ error: 'bad path' }, 400);
+    if (!isSafeRel(path)) return json({ error: 'bad path' }, 400);
     const buf = await request.arrayBuffer();
     if (buf.byteLength > SHARE_MAX_FILE) {
       return json({ error: 'file too large for share; use the tunnel', max: SHARE_MAX_FILE }, 413);
@@ -518,7 +610,7 @@ export class ShareRoom {
   }
 
   async delFile(path) {
-    if (!path) return json({ error: 'no path' }, 400);
+    if (!isSafeRel(path)) return json({ error: 'bad path' }, 400);
     const had = await this.state.storage.delete('file:' + path);
     if (had) this.broadcast({ type: 'deleted', path });
     return json({ ok: true });
@@ -528,6 +620,9 @@ export class ShareRoom {
   async handleWs(request) {
     if (request.headers.get('upgrade') !== 'websocket') {
       return new Response('expected websocket', { status: 426 });
+    }
+    if (this.state.getWebSockets().length >= MAX_PEERS) {
+      return new Response('room full', { status: 429 });
     }
     const pair = new WebSocketPair();
     const client = pair[0], server = pair[1];
@@ -595,12 +690,20 @@ async function handleCollab(request, env, url) {
   const room = slash < 0 ? rest : rest.slice(0, slash);
   const action = slash < 0 ? '' : rest.slice(slash + 1);
   if (!room || !action) return json({ error: 'not found' }, 404);
+  // `join` is server-internal (worker → DO stub on invite verify). Never let a
+  // client self-join an arbitrary room through the public route.
+  if (action === 'join' || action.startsWith('join/')) return json({ error: 'not found' }, 404);
 
   // Identify the caller from the session token in ?t= (WebSocket can't send an
   // Authorization header). The DO renders presence from this identity.
   const sid = url.searchParams.get('t') || bearer(request);
   const sess = await sessionFor(env, sid);
   if (!sess) return json({ error: 'unauthorized' }, 401);
+
+  // Throttle socket opens per IP (the WS endpoint is the easiest to hammer).
+  if (action === 'ws' && !(await rateLimit(env, 'collab-ws', clientIp(request), { ttl: 60, max: 60 }))) {
+    return json({ error: 'too many requests' }, 429);
+  }
 
   // Pass the verified identity to the DO via query params (robust across the
   // WebSocket upgrade — no header mutation on the forwarded request).
@@ -655,11 +758,35 @@ export class CollabRoom {
     const url = new URL(request.url);
     const parts = url.pathname.split('/').filter(Boolean);
     const action = parts[0] || '';
+    // `join` is internal-only (called by the worker on invite verify, directly
+    // on the stub — never via handleCollab, which 404s an external join).
     if (action === 'join') return this.join(request);
+
+    // Everything member-facing requires the caller be the room owner or a
+    // recorded member. The worker stamps the *verified* session id as `uid` and
+    // the room owner as `owner` (both query params the client can't forge: uid
+    // comes from the session, owner from the request path). Low-entropy room ids
+    // are NOT a capability — knowing one no longer grants access.
+    const uid = url.searchParams.get('uid') || '';
+    const owner = url.searchParams.get('owner') || (await this.state.storage.get('owner')) || '';
+    if (action === 'members' || action === 'ws' || action === 'fs') {
+      if (!(await this.isMember(uid, owner))) {
+        return json({ error: 'not a member of this room' }, 403);
+      }
+    }
+
     if (action === 'members') return this.members();
     if (action === 'ws') return this.handleWs(request);
     if (action === 'fs') return this.handleFs(parts[1] || '', request, url);
     return json({ error: 'not found' }, 404);
+  }
+
+  // Membership check: the owner always, or anyone with a persisted member
+  // record (written by `join` on invite verify).
+  async isMember(uid, owner) {
+    if (!uid) return false;
+    if (owner && uid === owner) return true;
+    return !!(await this.state.storage.get('member:' + uid));
   }
 
   async join(request) {
@@ -689,6 +816,9 @@ export class CollabRoom {
   async handleWs(request) {
     if (request.headers.get('upgrade') !== 'websocket') {
       return new Response('expected websocket', { status: 426 });
+    }
+    if (this.state.getWebSockets().length >= MAX_PEERS) {
+      return new Response('room full', { status: 429 });
     }
     const q = new URL(request.url).searchParams;
     const userId = q.get('uid') || '';
@@ -744,14 +874,14 @@ export class CollabRoom {
   }
 
   async fsGet(path) {
-    if (!path) return json({ error: 'no path' }, 400);
+    if (!isSafeRel(path)) return json({ error: 'bad path' }, 400);
     const f = await this.state.storage.get('f:' + path);
     if (!f) return json({ error: 'not found' }, 404);
-    return new Response(f.data, { headers: { 'content-type': f.mime || 'application/octet-stream', 'cache-control': 'no-store' } });
+    return safeFileResponse(f.data, f.mime);
   }
 
   async fsPut(path, request) {
-    if (!path || path.length > 1024) return json({ error: 'bad path' }, 400);
+    if (!isSafeRel(path)) return json({ error: 'bad path' }, 400);
     const buf = await request.arrayBuffer();
     if (buf.byteLength > SHARE_MAX_FILE) return json({ error: 'file too large', max: SHARE_MAX_FILE }, 413);
     const mime = request.headers.get('content-type') || 'application/octet-stream';
@@ -767,7 +897,7 @@ export class CollabRoom {
   }
 
   async fsDelete(path) {
-    if (!path) return json({ error: 'no path' }, 400);
+    if (!isSafeRel(path)) return json({ error: 'bad path' }, 400);
     const had = await this.state.storage.delete('f:' + path);
     if (had) this.broadcast({ type: 'fs', op: 'deleted', path });
     return json({ ok: true });
