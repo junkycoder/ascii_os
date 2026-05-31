@@ -87,6 +87,29 @@
   <div class="boot" id="boot">FakanOS booting…</div>
 
   <script type="module">
+    // ── Native-app magic link opened in a plain browser ──────────────
+    // A magic link requested from the iOS app carries &target=app. If the
+    // universal link fires, iOS opens the app directly and this page never
+    // loads. If it doesn't (e.g. Apple's AASA CDN cache is stale), the link
+    // lands here in Safari instead — so bounce the token into the app via its
+    // custom URL scheme (fakanos://auth?token=…). We do NOT verify the token
+    // here in that case: it's single-use, and the app must be the one to spend
+    // it. Skip the bounce inside the app's own webview (Capacitor present).
+    const handoffToApp = (() => {
+      try {
+        const p = new URLSearchParams(location.search);
+        const tok = p.get('token');
+        const isCap = !!(globalThis.Capacitor &&
+          globalThis.Capacitor.isNativePlatform &&
+          globalThis.Capacitor.isNativePlatform());
+        if (tok && p.get('target') === 'app' && !isCap) {
+          location.href = 'fakanos://auth?token=' + encodeURIComponent(tok);
+          return true;
+        }
+      } catch (_) {}
+      return false;
+    })();
+
     // Cache-bust all module imports per page load. The dev server sends
     // no-store, but Chromium's ESM module map can keep stale modules
     // across navigations on the same origin — query bust guarantees fresh.
@@ -277,7 +300,10 @@
     // otherwise show the login form.
     const urlToken = auth.tokenFromUrl();
     const session = auth.getSession();
-    if (urlToken) {
+    if (handoffToApp) {
+      // Already redirected to the native app (fakanos://); leave the token
+      // unconsumed for the app to verify. Nothing more to do in this tab.
+    } else if (urlToken) {
       const login = startLogin();
       await login.signIn(urlToken);   // verify → onLogin → bootShell (or surfaces an error)
     } else if (session) {
