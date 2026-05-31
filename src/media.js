@@ -178,13 +178,13 @@ function loadImage(src) {
     // play along, getImageData below will throw — fine, caller sees it.
     img.crossOrigin = "anonymous";
     img.onload = () => res(img);
-    img.onerror = (e) => rej(new Error("imageToAscii: failed to load image"));
+    img.onerror = (e) => rej(new Error("imageToCells: failed to load image"));
     if (typeof src === "string") {
       img.src = src;
     } else if (src instanceof Blob) {
       img.src = URL.createObjectURL(src);
     } else {
-      rej(new Error("imageToAscii: src must be a URL string or Blob"));
+      rej(new Error("imageToCells: src must be a URL string or Blob"));
     }
   });
 }

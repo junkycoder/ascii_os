@@ -420,7 +420,9 @@ export function createApp(initialCtx, win) {
     imgLoading = true;
     const reqPath = path;
     try {
-      const bytes = fs.readBytes(path);            // ArrayBuffer
+      // Async read so mounted-local files (File System Access) work — sync
+      // readBytes only sees the in-memory cache and fails for cold mounts.
+      const bytes = await fs.readBytesAsync(path);  // ArrayBuffer
       const blob = new Blob([bytes], { type: mimeForName(path) });
       if (imgUrl) { try { URL.revokeObjectURL(imgUrl); } catch (_) {} imgUrl = null; }
       imgUrl = URL.createObjectURL(blob);
