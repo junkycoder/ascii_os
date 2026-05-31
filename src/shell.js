@@ -22,6 +22,7 @@ import { createMusicPlayer } from './music.js';
 import { createKeyboard } from './keyboard.js';
 import userPrefs from './user.js';
 import * as nf from './newfish.js';
+import { PIXEL_ICONS, USER_AVATAR, fileSprite, spriteToHalfCells } from './icons.js';
 
 // Set inside createShell so the module-level 'timetrack' widget can open the
 // Time app on click (widget render/onClick live at module scope, like music).
@@ -83,15 +84,42 @@ const PATTERNS = {
   blank:  null,
 };
 
-// Icon dimensions: a tight tile (3-row box hugging the glyph + up to 2 label rows).
-const ICON_W = 8;
-const ICON_BOX_H = 3;          // bordered box height (top + 1 interior + bottom)
+// Icon dimensions: a tile big enough for an 8×8 half-block pixel sprite
+// (interior 8 wide × 4 tall cells) plus a border, with up to 2 label rows below.
+const ICON_W = 10;             // border + 8 interior + border
+const ICON_BOX_H = 6;          // border + 4 interior + border
 const ICON_H = ICON_BOX_H + 1; // box + 1 baseline label row (hit-test height)
-const ICON_LAYOUT_V = 4;       // bump when icon size changes → drop stale positions
+const ICON_LAYOUT_V = 5;       // bump when icon size changes → drop stale positions
 
 // Built-in widgets — pinned panels on the desktop. Each renders into a
 // sub-context. Spec: { defaultSize: {w, h}, render(ctx, widget) }.
 const WIDGETS = {
+  user: {
+    defaultSize: { w: 20, h: 6 },
+    label: 'user',
+    render(ctx, w, env) {
+      const c = ctx.theme.peek().colors;
+      ctx.box(0, 0, ctx.width, ctx.height, { fg: c.border, glyphSet: 'borderRound' });
+      // Pixel avatar (8×8 half-block) on the left.
+      const cells = spriteToHalfCells(USER_AVATAR, c, c.bg);
+      const oy = 1 + Math.max(0, Math.floor(((ctx.height - 2) - cells.length) / 2));
+      for (let cy = 0; cy < cells.length; cy++) {
+        const row = cells[cy];
+        for (let cx = 0; cx < row.length; cx++) {
+          const cell = row[cx];
+          if (cell) ctx.put(1 + cx, oy + cy, cell.ch, { fg: cell.fg, bg: cell.bg });
+        }
+      }
+      // Name + session line on the right.
+      const u = (env && env.user) || {};
+      const nx = 10; // 1 border + 8 avatar + 1 gap
+      const avail = Math.max(1, ctx.width - nx - 1);
+      const midY = Math.floor(ctx.height / 2);
+      ctx.text(nx, midY - 1, String(u.name || 'guest').slice(0, avail), { fg: c.accent, bold: true });
+      const sub = u.guest ? 'guest session' : String(u.email || 'signed in');
+      ctx.text(nx, midY, sub.slice(0, avail), { fg: c.fgDim });
+    },
+  },
   clock: {
     defaultSize: { w: 12, h: 4 },
     label: 'clock',
@@ -464,21 +492,29 @@ export function createShell(engine, opts = {}) {
   }
 
   // ── Icon layout ─────────────────────────────────────────────────
-  // Default grid: left column on wide screens, grid on narrow.
-  // Each icon is ICON_W × ICON_H cells; spacing 1 cell.
+  // Each icon is ICON_W × ICON_H cells. On wide screens icons fill a
+  // column-major grid (top→bottom, then right) so the bigger pixel tiles fit;
+  // on narrow screens a row-major grid that wraps by width.
+  const SLOT_H = ICON_BOX_H + 3; // box + up to 2 label rows + 1 gap
+  const SLOT_W = ICON_W + 2;
+  function iconsPerColumn() {
+    const tb = taskbarPos.peek() === 'hidden' ? 0 : 1;
+    return Math.max(1, Math.floor((engine.rows.peek() - tb - 1) / SLOT_H));
+  }
+  function appGridColumns() {
+    return Math.max(1, Math.ceil(apps.length / iconsPerColumn()));
+  }
   function defaultIconPos(appIdx) {
     const isWide = engine.cols.peek() >= 60;
-    const slotH = ICON_BOX_H + 2; // box (5) + 2 label rows, tight spacing
-    const slotW = ICON_W + 2;
     if (isWide) {
-      return { x: 2, y: 1 + appIdx * slotH };
-    } else {
-      const perRow = Math.max(1, Math.floor((engine.cols.peek() - 2) / slotW));
-      return {
-        x: 2 + (appIdx % perRow) * slotW,
-        y: 1 + Math.floor(appIdx / perRow) * slotH,
-      };
+      const perCol = iconsPerColumn();
+      return { x: 2 + Math.floor(appIdx / perCol) * SLOT_W, y: 1 + (appIdx % perCol) * SLOT_H };
     }
+    const perRow = Math.max(1, Math.floor((engine.cols.peek() - 2) / SLOT_W));
+    return {
+      x: 2 + (appIdx % perRow) * SLOT_W,
+      y: 1 + Math.floor(appIdx / perRow) * SLOT_H,
+    };
   }
   function iconPos(appId, appIdx) {
     if (iconPositions.has(appId)) return iconPositions.get(appId);
@@ -698,7 +734,7 @@ export function createShell(engine, opts = {}) {
 
   // A rounded tile: ICON_W wide × ICON_BOX_H tall, glyph centered on a faint
   // face. Shared by app and file icons for a consistent, bigger look.
-  function drawIconTile(x, y, glyph, borderFg, glyphFg, faceBg) {
+  function drawIconTile(x, y, glyph, borderFg, glyphFg, faceBg, sprite) {
     const g = engine.theme.peek().glyphs.borderRound;
     const inner = ICON_W - 2;
     engine.text(x, y, g.tl + g.h.repeat(inner) + g.tr, { fg: borderFg });
@@ -708,7 +744,23 @@ export function createShell(engine, opts = {}) {
       engine.put(x + ICON_W - 1, y + r, g.v, { fg: borderFg });
     }
     engine.text(x, y + ICON_BOX_H - 1, g.bl + g.h.repeat(inner) + g.br, { fg: borderFg });
-    // Glyph (1–2 chars) centered in the interior.
+    if (sprite) {
+      // Pixel sprite as half-block, centered in the interior.
+      const colors = engine.theme.peek().colors;
+      const cells = spriteToHalfCells(sprite, colors, faceBg);
+      const innerH = ICON_BOX_H - 2;
+      const ox = x + 1 + Math.max(0, Math.floor((inner - sprite.w) / 2));
+      const oy = y + 1 + Math.max(0, Math.floor((innerH - cells.length) / 2));
+      for (let cy = 0; cy < cells.length && cy < innerH; cy++) {
+        const row = cells[cy];
+        for (let cx = 0; cx < row.length && cx < inner; cx++) {
+          const cell = row[cx];
+          if (cell) engine.put(ox + cx, oy + cy, cell.ch, { fg: cell.fg, bg: cell.bg });
+        }
+      }
+      return;
+    }
+    // Glyph (1–2 chars) centered in the interior — fallback when no sprite.
     const gstr = String(glyph).slice(0, 2);
     const gx = x + Math.floor((ICON_W - gstr.length) / 2);
     const gy = y + Math.floor(ICON_BOX_H / 2);
@@ -729,8 +781,8 @@ export function createShell(engine, opts = {}) {
       const fg = isDragging ? c.borderFocus : c.accent;
       const labelFg = isDragging ? c.borderFocus : c.fg;
       const face = isDragging ? (c.accentDim || c.border) : c.border;
-      // Bigger rounded tile with a faint face + centered glyph.
-      drawIconTile(x, y, glyphFromIcon(app.icon), fg, c.accent, face);
+      // Pixel sprite (8×8 half-block) when we have one for this app; else glyph.
+      drawIconTile(x, y, glyphFromIcon(app.icon), fg, c.accent, face, PIXEL_ICONS[app.id]);
       // Centered label under the tile (wraps for long / two-word names).
       drawIconLabel(x, y + ICON_BOX_H, app.label || app.id, labelFg);
     });
@@ -762,16 +814,21 @@ export function createShell(engine, opts = {}) {
   }
 
   function defaultFileIconPos(fileIdx) {
-    // Files go in a column to the RIGHT of app icons.
     const isWide = engine.cols.peek() >= 60;
-    const slotH = ICON_BOX_H + 2;
     if (isWide) {
-      return { x: 2 + (ICON_W + 2) + 4, y: 1 + fileIdx * slotH };
-    } else {
-      // Below apps in narrow mode
-      const appsHeight = 1 + apps.length * slotH;
-      return { x: 2, y: appsHeight + 1 + fileIdx * slotH };
+      // Files grid sits to the RIGHT of the whole app grid.
+      const perCol = iconsPerColumn();
+      const x0 = 2 + appGridColumns() * SLOT_W + 2;
+      return { x: x0 + Math.floor(fileIdx / perCol) * SLOT_W, y: 1 + (fileIdx % perCol) * SLOT_H };
     }
+    // Narrow: below the app grid, wrapping by width.
+    const perRow = Math.max(1, Math.floor((engine.cols.peek() - 2) / SLOT_W));
+    const appRows = Math.ceil(apps.length / perRow);
+    const appsHeight = 1 + appRows * SLOT_H;
+    return {
+      x: 2 + (fileIdx % perRow) * SLOT_W,
+      y: appsHeight + 1 + Math.floor(fileIdx / perRow) * SLOT_H,
+    };
   }
 
   function fileIcon(name, fileIdx) {
@@ -804,7 +861,8 @@ export function createShell(engine, opts = {}) {
       // Selected tiles get a theme-tinted face; others stay outline-only so they
       // read lighter than app icons.
       const faceBg = isSelected ? c.border : c.bg;
-      drawIconTile(x, y, extGlyph(f.name), fg, glyphFg, faceBg);
+      // Pixelart file icon by extension category (glyph stays as fallback).
+      drawIconTile(x, y, extGlyph(f.name), fg, glyphFg, faceBg, fileSprite(f.name));
       // Filename centered under the tile (wraps for two-part names).
       drawIconLabel(x, y + ICON_BOX_H, f.name, isSelected ? c.accent : c.fg);
     });
@@ -921,6 +979,7 @@ export function createShell(engine, opts = {}) {
       rows: engine.rows.peek(),
       mode: engine.mode.peek(),
       theme: engine.theme.peek().name,
+      user,
     };
     const c = engine.theme.peek().colors;
     for (const w of widgets.peek()) {
@@ -1953,11 +2012,12 @@ export function createShell(engine, opts = {}) {
   effect(() => { fs.changes.value; });
   fs.subscribe('/desktop', () => { /* react via signal */ });
 
-  // First-boot defaults: spawn a clock widget if user has nothing saved.
+  // First-boot defaults: spawn a clock + user widget if nothing is saved.
   if (!saved?.widgets?.length) {
     setTimeout(() => {
       const cols = engine.cols.peek();
       addWidget('clock', { x: Math.max(2, cols - 14), y: 2 });
+      if (user) addWidget('user', { x: Math.max(2, cols - 22), y: 7 });
     }, 0);
   }
 
