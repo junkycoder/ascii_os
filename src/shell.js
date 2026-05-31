@@ -1217,9 +1217,26 @@ export function createShell(engine, opts = {}) {
     const dest = '/' + destInput.replace(/^\/+|\/+$/g, '');
     if (dest === '/') { window.alert('Zadej složku, ne kořen /.'); return; }
     if (fs.exists(dest)) { window.alert('Cesta už existuje: ' + dest); return; }
+    // Token (for private repos) goes in a header, never the URL.
+    const fetchClone = async (token) => {
+      const headers = token ? { 'X-Git-Token': token } : {};
+      const r = await fetch('/api/git/clone?repo=' + encodeURIComponent(spec.trim()), { headers });
+      let d = {}; try { d = await r.json(); } catch {}
+      return { res: r, data: d };
+    };
     try {
-      const res = await fetch('/api/git/clone?repo=' + encodeURIComponent(spec.trim()));
-      const data = await res.json();
+      let { res, data } = await fetchClone(null);
+      // 404 = not found OR private. Offer a token and retry once.
+      if (res.status === 404) {
+        const tok = window.prompt(
+          'Repo nenalezeno, nebo je privátní.\n\n' +
+          'Pro privátní repo vlož GitHub token (Personal Access Token).\n' +
+          'Vytvoř ho zde (zaškrtni scope „repo“):\n' +
+          'https://github.com/settings/tokens/new?scopes=repo&description=FakanOS\n\n' +
+          'Token (prázdné = zrušit):', '');
+        if (!tok || !tok.trim()) return;
+        ({ res, data } = await fetchClone(tok.trim()));
+      }
       if (!res.ok) throw new Error((data && (data.detail || data.error)) || ('HTTP ' + res.status));
       const files = (data.files || []).map(f => ({
         path: f.path,

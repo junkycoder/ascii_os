@@ -118,16 +118,20 @@ class NoCacheHandler(SimpleHTTPRequestHandler):
         owner, repo = m.group(1), m.group(2)
         target = "https://api.github.com/repos/%s/%s/tarball/%s" % (
             owner, repo, urllib.parse.quote(ref))
-        req = urllib.request.Request(target, headers={
-            "User-Agent": "FakanOS", "Accept": "application/vnd.github+json"})
+        hdrs = {"User-Agent": "FakanOS", "Accept": "application/vnd.github+json"}
+        tok = (self.headers.get("X-Git-Token") or "").strip()  # private repos; never stored/logged
+        if tok:
+            hdrs["Authorization"] = "Bearer " + tok
+        req = urllib.request.Request(target, headers=hdrs)
         try:
             with urllib.request.urlopen(req, timeout=60) as up:
                 raw = up.read()
         except urllib.error.HTTPError as e:
-            detail = "repo or ref not found (private repos unsupported)" if e.code == 404 \
+            detail = "repo or ref not found — private repos need a token with repo scope" if e.code == 404 \
+                else "bad or expired token" if e.code == 401 \
                 else "github rate limit — try later" if e.code == 403 else ""
             self._send_json({"error": "github %d" % e.code, "detail": detail},
-                            404 if e.code == 404 else 502)
+                            e.code if e.code in (401, 404) else 502)
             return
         except Exception as e:  # noqa: BLE001
             self._send_json({"error": "github fetch failed", "detail": str(e)}, 502)

@@ -939,15 +939,21 @@ async function handleGitClone(request, env, url) {
   const ref = (url.searchParams.get('ref') || '').trim();
   const tarUrl = `https://api.github.com/repos/${parsed.owner}/${parsed.repo}/tarball/${encodeURIComponent(ref)}`;
   const headers = { 'user-agent': 'FakanOS', 'accept': 'application/vnd.github+json' };
-  if (env && env.GITHUB_TOKEN) headers.authorization = 'Bearer ' + env.GITHUB_TOKEN;
+  // Token (for private repos) rides a header — never the query string. A
+  // client-supplied token wins over the optional server-side GITHUB_TOKEN.
+  // It is used only for this fetch and never stored or logged.
+  const token = (request.headers.get('x-git-token') || '').trim() || (env && env.GITHUB_TOKEN) || '';
+  if (token) headers.authorization = 'Bearer ' + token;
 
   let up;
   try { up = await fetch(tarUrl, { headers }); }
   catch (e) { return json({ error: 'github fetch failed', detail: String(e) }, 502); }
   if (!up.ok || !up.body) {
-    const detail = up.status === 404 ? 'repo or ref not found (private repos unsupported)'
+    const detail = up.status === 404 ? 'repo or ref not found — private repos need a token with repo scope'
+      : up.status === 401 ? 'bad or expired token'
       : up.status === 403 ? 'github rate limit — try later' : '';
-    return json({ error: `github ${up.status}`, detail }, up.status === 404 ? 404 : 502);
+    const status = (up.status === 404 || up.status === 401) ? up.status : 502;
+    return json({ error: `github ${up.status}`, detail }, status);
   }
 
   let tar;
