@@ -232,6 +232,21 @@
         import('./src/apps/share.js' + V),
       ]);
 
+      // Collaborative desktop: connect this user to their room's presence so the
+      // shell can show who's here + live cursors. The room is the owner's user id
+      // (a remembered invite carries someone else's room; otherwise it's our own).
+      let collabConn = null, collabClient = null;
+      const sess = auth.getSession();
+      const room = (sess && sess.room) || user.id;
+      const isOwner = room === user.id;
+      if (sess && sess.token) {
+        try {
+          const { createCollabClient } = await import('./src/collab.js' + V);
+          collabClient = createCollabClient();
+          collabConn = collabClient.connect(room, sess.token, {});
+        } catch (e) { console.warn('collab presence unavailable', e); }
+      }
+
       const appRegistry = [
         { id: 'readme',    label: 'README',    icon: '[?]', factory: createReadme },
         { id: 'findman',   label: 'Findman',   icon: '[▸]', factory: createFindman },
@@ -253,6 +268,10 @@
         storageKey: auth.shellKey(user),
         user,
         onLogout: () => { auth.clearSession(); location.reload(); },
+        // Collaborative presence: the live socket + the inviter (owner only).
+        collab: collabConn,
+        canInvite: isOwner && !!(sess && sess.token),
+        onInvite: (email, nick) => collabClient && collabClient.invite(sess.token, { email, nick }),
       });
 
       const offFrame = engine.onFrame(() => shell.render());
@@ -305,7 +324,15 @@
       // unconsumed for the app to verify. Nothing more to do in this tab.
     } else if (urlToken) {
       const login = startLogin();
-      await login.signIn(urlToken);   // verify → onLogin → bootShell (or surfaces an error)
+      // An invite link (carries a room) for a NEW email gets a nickname step;
+      // existing accounts (and plain sign-in links) go straight through verify.
+      let info = null;
+      try { info = await auth.peek(urlToken); } catch (_) {}
+      if (info && info.valid && info.invite && !info.exists) {
+        await login.signInInvite(urlToken, info);
+      } else {
+        await login.signIn(urlToken); // verify → onLogin → bootShell (or surfaces an error)
+      }
     } else if (session) {
       await bootShell(session.user);
       // Long-remember: only sign out if the server explicitly rejects the token.
