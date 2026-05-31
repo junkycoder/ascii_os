@@ -3,6 +3,7 @@
 // Serves the zero-build vanilla ES-module shell via the static ASSETS binding,
 // plus:
 //   • /api/auth/*            email + magic-link sign-in (Cloudflare KV + Resend)
+//   • /api/feedback/*        public feedback board (verified-email post + email ack)
 //   • /api/share/*           Durable-Object file share (local→DO→locals) + WS
 //                            live sync + WebRTC signaling relay (tunnel)
 //   • /auth                  universal-link landing → serves the SPA shell
@@ -25,6 +26,17 @@ const MAGIC_TTL = 900;                  // magic link valid 15 min, single use
 const SESSION_TTL = 60 * 60 * 24 * 365; // remember the login ~1 year
 const REQUEST_THROTTLE = 60;            // min seconds between link requests / email (KV TTL floor)
 
+// ── Feedback board ──────────────────────────────────────────────────
+// A single public board: anyone can read, only a signed-in (verified-email)
+// account can post. Stored as one capped JSON blob in the AUTH KV namespace —
+// volume is low, so one read/write per call beats per-item key fan-out. Author
+// contact emails are kept server-side (never returned in the public list).
+const FEEDBACK_KEY = 'feedback:v1';
+const FEEDBACK_MAX = 200;               // keep the most recent N on the board
+const FEEDBACK_TEXT_MAX = 2000;
+const FEEDBACK_POST_THROTTLE = 20;      // min seconds between posts per account
+const FEEDBACK_CATEGORIES = ['bug', 'idea', 'praise', 'other'];
+
 // ── File share (Durable Object) ─────────────────────────────────────
 // Small files (text + small images/audio) live inside the DO; anything bigger
 // is meant to go peer-to-peer over the WebRTC tunnel the DO only *signals* for.
@@ -46,6 +58,7 @@ export default {
     const path = url.pathname;
 
     if (path.startsWith('/api/auth/')) return handleAuth(request, env, url);
+    if (path === '/api/feedback' || path.startsWith('/api/feedback/')) return handleFeedback(request, env, url);
     if (path.startsWith('/api/share/')) return handleShare(request, env, url);
     if (path.startsWith('/api/collab/')) return handleCollab(request, env, url);
     if (path === '/.well-known/apple-app-site-association') return aasa(env);
@@ -255,6 +268,118 @@ async function sendMagicEmail(env, email, link) {
     '<p><a href="' + link + '" style="display:inline-block;background:#00ff88;color:#0d0d0d;padding:12px 20px;border-radius:6px;text-decoration:none;font-weight:bold">Sign in →</a></p>' +
     '<p style="color:#777;font-size:12px;word-break:break-all">' + link + '</p>' +
     '<p style="color:#555;font-size:12px">If you did not request this, ignore this email.</p>' +
+    '</div>';
+
+  const res = await fetch('https://api.resend.com/emails', {
+    method: 'POST',
+    headers: { authorization: 'Bearer ' + env.RESEND_API_KEY, 'content-type': 'application/json' },
+    body: JSON.stringify({ from, to: [email], subject, text, html }),
+  });
+  if (!res.ok) {
+    const detail = await res.text().catch(() => '');
+    throw new Error('resend ' + res.status + ' ' + detail.slice(0, 200));
+  }
+}
+
+// ── /api/feedback/* — public feedback board ─────────────────────────
+//   GET  /api/feedback        (or /list) → { items }  (public; no emails)
+//   POST /api/feedback        (Bearer session) → { ok, item }  (verified email)
+async function handleFeedback(request, env, url) {
+  if (!env.AUTH) return json({ error: 'feedback not configured' }, 500);
+  const route = url.pathname.slice('/api/feedback'.length).replace(/^\//, '');
+  if (request.method === 'GET' && (route === '' || route === 'list')) return feedbackList(env);
+  if (request.method === 'POST' && (route === '' || route === 'new')) return feedbackPost(request, env);
+  return json({ error: 'not found' }, 404);
+}
+
+async function readFeedback(env) {
+  const raw = await env.AUTH.get(FEEDBACK_KEY);
+  if (!raw) return [];
+  try { const a = JSON.parse(raw); return Array.isArray(a) ? a : []; } catch { return []; }
+}
+
+// Public board read — strip the private contact email from every item.
+async function feedbackList(env) {
+  const items = await readFeedback(env);
+  const pub = items.map(({ contact, ...rest }) => rest);
+  return json({ items: pub });
+}
+
+// Keep only short, known-shape context strings (don't trust the client blob).
+function sanitizeContext(c) {
+  if (!c || typeof c !== 'object') return null;
+  const clip = (v, n) => (v == null ? '' : String(v).slice(0, n));
+  return {
+    version: clip(c.version, 32),
+    theme: clip(c.theme, 24),
+    mode: clip(c.mode, 16),
+    platform: clip(c.platform, 80),
+  };
+}
+
+async function feedbackPost(request, env) {
+  const s = await sessionFor(env, bearer(request));
+  if (!s || !isEmail(s.email)) {
+    return json({ error: 'sign in with a verified email to post feedback' }, 401);
+  }
+
+  const body = await readJSON(request);
+  let text = String((body && body.text) || '').trim();
+  if (!text) return json({ error: 'feedback text is required' }, 400);
+  if (text.length > FEEDBACK_TEXT_MAX) text = text.slice(0, FEEDBACK_TEXT_MAX);
+
+  let category = String((body && body.category) || 'other').trim().toLowerCase();
+  if (!FEEDBACK_CATEGORIES.includes(category)) category = 'other';
+
+  const rawContact = String((body && body.contact) || '').trim().toLowerCase();
+  const contact = isEmail(rawContact) ? rawContact : s.email;
+
+  // Per-account throttle so one signed-in user can't flood the board.
+  const rlKey = 'fbrl:' + s.id;
+  if (await env.AUTH.get(rlKey)) return json({ error: 'please wait a moment before posting again' }, 429);
+  await env.AUTH.put(rlKey, '1', { expirationTtl: FEEDBACK_POST_THROTTLE });
+
+  const item = {
+    id: randToken().slice(0, 12),
+    userId: s.id,
+    name: String(s.username || s.email.split('@')[0] || 'user').slice(0, 24),
+    category,
+    text,
+    contact,
+    context: sanitizeContext(body && body.context),
+    createdAt: Date.now(),
+  };
+
+  const items = await readFeedback(env);
+  items.unshift(item);
+  if (items.length > FEEDBACK_MAX) items.length = FEEDBACK_MAX;
+  await env.AUTH.put(FEEDBACK_KEY, JSON.stringify(items));
+
+  // Friendly acknowledgement to the author — best-effort, never blocks the post.
+  try { await sendFeedbackEmail(env, contact, item); } catch {}
+
+  const { contact: _omit, ...pub } = item;
+  return json({ ok: true, item: pub });
+}
+
+// "We'll send them a nice email" — a themed thank-you echoing their note.
+async function sendFeedbackEmail(env, email, item) {
+  if (!env.RESEND_API_KEY || !isEmail(email)) return;
+  const from = env.MAIL_FROM || 'FakanOS <login@fakan.cz>';
+  const esc = (s) => String(s).replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+  const subject = 'Thanks for your FakanOS feedback';
+  const text =
+    'Thanks for the feedback!\n\n' +
+    'We logged your ' + item.category + ' note on the FakanOS board:\n\n' +
+    '"' + item.text + '"\n\n' +
+    'We read every message and may follow up at this address.\n\n— FakanOS';
+  const html =
+    '<div style="font-family:ui-monospace,Menlo,monospace;background:#0d0d0d;color:#ddd;padding:32px">' +
+    '<div style="color:#00ff88;font-size:20px;font-weight:bold;letter-spacing:2px">F a k a n O S</div>' +
+    '<p style="color:#bbb">Thanks for your feedback — we logged your <b>' + esc(item.category) + '</b> note on the board.</p>' +
+    '<blockquote style="border-left:3px solid #00ff88;margin:16px 0;padding:8px 16px;color:#ddd;white-space:pre-wrap">' + esc(item.text) + '</blockquote>' +
+    '<p style="color:#777;font-size:12px">We read every message and may follow up at this address.</p>' +
+    '<p style="color:#555;font-size:12px">— FakanOS</p>' +
     '</div>';
 
   const res = await fetch('https://api.resend.com/emails', {

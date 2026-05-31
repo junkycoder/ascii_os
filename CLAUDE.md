@@ -55,10 +55,11 @@ src/collab.js    collaborative-desktop client: email invite + presence WS +
 src/collabsync.js two-way shared-desktop FS sync (owner /desktop ⇄ /room/<owner>/)
                  via the CollabRoom DO; loop-safe shadow map (createDesktopSync)
 src/apps/*.js    apps: terminal, snake, notes, paint, readme, findman,
-                 mediamogul (Media House), gamemaker, share
+                 mediamogul (Media House), gamemaker, share, feedback
 index.html       boots engine → login → shell (dynamic imports with ?v= cache-bust)
 bench.html       standalone perf benchmark
-worker/index.js  Cloudflare Worker entry: serves ASSETS, /api/auth/*, /api/share/*
+worker/index.js  Cloudflare Worker entry: serves ASSETS, /api/auth/*,
+                 /api/feedback/* (public board, KV-backed), /api/share/*
                  (ShareRoom DO), /api/collab/* (CollabRoom DO), /api/newfish/* proxy
 wrangler.jsonc   Cloudflare config (assets from repo root, no build)
 .claude/devserver.py   dev server with Cache-Control: no-store

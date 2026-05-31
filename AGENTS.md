@@ -83,6 +83,15 @@ signals → engine → { fs, user, drafts, themes } → { wm, ui, ui-menu, markd
   **tunnel** (big files). **Backend** = `ShareRoom` DO in `worker/index.js`
   (binding `SHARE`, SQLite migration in `wrangler.jsonc`); needs a live worker
   (not the python devserver). Handoffs: `__aciiSharePath`, `__aciiShareJoin`.
+- **`apps/feedback.js`** — public feedback board. Anyone reads; only a signed-in
+  account with a **verified email** (not a guest) posts (imports `getSession`
+  from `auth.js`, sends the session bearer). Form: category · multi-line message
+  · reply-to email (prefilled) · auto-attached context. **Backend** =
+  `/api/feedback` in `worker/index.js`: `GET …/list` is public and strips contact
+  emails; `POST` requires the bearer + is throttled per account, appends to one
+  capped JSON blob (`feedback:v1`) in the **same `AUTH` KV**, and emails the
+  author a themed thank-you via **Resend**. Reuses the live auth infra — no new
+  bindings/secrets. Needs a live worker (the python devserver 404s the API).
 - **`collab.js`** — collaborative desktop. A room is one owner's desktop, keyed
   by the **owner's user id**; people join by **email invite** (owner → user-chip
   "Invite to desktop…" → magic link carrying the room). Boot `peek`s the token to
