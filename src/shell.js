@@ -556,6 +556,8 @@ export function createShell(engine, opts = {}) {
 
   // Expose openApp to the module-level 'timetrack' widget's onClick.
   _shellOpenApp = openApp;
+  // Let apps open/focus another app (e.g. Findman's "Share…" → share app).
+  globalThis.__aciiOpenApp = (id) => openOrFocus(id);
 
   function closeWindow(win) { win.close(); }
 
@@ -1348,7 +1350,32 @@ export function createShell(engine, opts = {}) {
     }
   }
 
-  engine.onContextMenu((e) => { openContextMenuAt(e.x, e.y); });
+  engine.onContextMenu((e) => {
+    // A right-click inside the focused window's content area lets the app offer
+    // its own menu: onContextMenu({x,y}) (LOCAL coords) may return { items }
+    // which we render through the shared menu surface (same z-order / input as
+    // every other context menu). Anything else falls back to the desktop menus.
+    const f = wm.focused.peek();
+    if (f) {
+      const wx = f.x.peek(), wy = f.y.peek(), ww = f.w.peek(), wh = f.h.peek();
+      const bx = wx + 1, by = wy + 1, bw = ww - 2, bh = wh - 2;
+      if (e.x >= bx && e.y >= by && e.x < bx + bw && e.y < by + bh) {
+        const rec = running.get(f.id);
+        if (rec?.instance?.onContextMenu) {
+          let res;
+          try { res = rec.instance.onContextMenu({ x: e.x - bx, y: e.y - by }); } catch {}
+          if (res && Array.isArray(res.items) && res.items.length) {
+            activeMenu.value = createContextMenu({
+              x: e.x, y: e.y, items: res.items,
+              onClose: () => { activeMenu.value = null; },
+            });
+          }
+          return;
+        }
+      }
+    }
+    openContextMenuAt(e.x, e.y);
+  });
 
   // ── File drop: drag a file from OS onto the desktop or window ───
   engine.onFileDrop(async (e) => {

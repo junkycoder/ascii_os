@@ -262,7 +262,12 @@ export function createEngine(opts = {}) {
     root.addEventListener(evt, (e) => {
       if (evt === "mousedown" && e.button === 0 && !e.shiftKey) {
         // Block browser from starting a text selection on left-click drags.
+        // preventDefault() also suppresses the browser's default focus-on-click,
+        // so once root lost keyboard focus (clicking browser chrome, a dialog,
+        // another tab) a click back into the grid wouldn't restore it and keys
+        // went nowhere. Refocus explicitly so typing always works after a click.
         e.preventDefault();
+        if (document.activeElement !== root) root.focus({ preventScroll: true });
       }
       const { x, y } = cellFromEvent(e);
       for (const h of mouseHandlers) h({ type: evt, x, y, button: e.button, deltaY: e.deltaY, raw: e });

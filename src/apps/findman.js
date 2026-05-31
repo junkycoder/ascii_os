@@ -1281,8 +1281,59 @@ export function createApp(initialCtx, win) {
     },
 
     onContextMenu(e) {
-      // Right-click anywhere opens the about box (lightweight menu surface).
-      showAbout = true;
+      // Right-click in the tree → a file menu (the shell renders the items we
+      // return). Right-click in the editor / chrome → the lightweight about box.
+      const W = initialCtx.width, H = initialCtx.height;
+      const lw = leftPaneWidth(W), paneH = H - 1;
+      const inTree = e.x >= 0 && e.x < lw && e.y >= 1 && e.y < paneH - 1;
+      if (!inTree) { showAbout = true; return null; }
+
+      const rowIdx = treeScroll + (e.y - 1);
+      const r = (rowIdx >= 0 && rowIdx < visibleRows.length) ? visibleRows[rowIdx] : null;
+
+      // Right-clicking a row that isn't already in the multi-selection makes it
+      // the cursor (so New/Rename/Delete act on what was clicked).
+      if (r && !r.isMountAction && !selected.has(r.path)) {
+        focus = 'tree';
+        clearMulti();
+        selectByIndex(rowIdx);
+        selAnchorIdx = rowIdx;
+      }
+
+      const sep = { type: 'separator' };
+      // The "+ mount local…" action row gets its own one-item menu.
+      if (r && r.isMountAction) {
+        return { items: [{ label: 'Mount local folder…', onSelect: () => tryMountLocal() }] };
+      }
+      // Empty space below the tree → create-in-root actions only.
+      if (!r) {
+        return { items: [
+          { label: 'New file…',   onSelect: () => newFile() },
+          { label: 'New folder…', onSelect: () => newFolder() },
+        ] };
+      }
+
+      const multi = selected.size > 1 && selected.has(r.path);
+      const isDir = r.type === 'dir';
+      const items = [];
+      if (!multi) {
+        items.push(isDir
+          ? { label: expanded.has(r.path) ? 'Collapse' : 'Expand', hotkey: '↵', onSelect: () => activateSelection() }
+          : { label: 'Open', hotkey: '↵', onSelect: () => activateSelection() });
+        items.push({ label: 'Share…', hotkey: 'S', onSelect: () => {
+          globalThis.__aciiSharePath = r.path;
+          globalThis.__aciiOpenApp?.('share');
+        } });
+        items.push(sep);
+      }
+      items.push({ label: 'New file…',   onSelect: () => newFile() });
+      items.push({ label: 'New folder…', onSelect: () => newFolder() });
+      if (!multi) items.push({ label: 'Rename…', hotkey: 'R', onSelect: () => renameSelected() });
+      items.push(sep);
+      items.push(multi
+        ? { label: `Delete ${selected.size} items`, danger: true, hotkey: '⌫', onSelect: () => deleteSelected() }
+        : { label: 'Delete', danger: true, hotkey: '⌫', onSelect: () => deleteSelected() });
+      return { items };
     },
 
     destroy() {
