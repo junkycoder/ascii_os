@@ -75,6 +75,14 @@ signals → engine → { fs, user, drafts, themes } → { wm, ui, ui-menu, markd
   Each account is namespaced by its server user id (`acii.fs.v1::<id>`).
   **Backend** = `worker/index.js` + Cloudflare KV (`AUTH`) + Resend; the python
   devserver can't run it — use `wrangler dev` or deploy to exercise auth.
+- **`share.js` + `apps/share.js`** — Durable-Object file share (local→DO→locals).
+  A room is keyed by an unguessable code (the code IS the capability). Source
+  PUTs small files (≤`SHARE_MAX_FILE` 256 KiB) into the per-code `ShareRoom` DO;
+  peers join by code, pull into `/share/<code>/`. A WebSocket carries live
+  add/update/delete events and relays WebRTC signaling for a peer-to-peer
+  **tunnel** (big files). **Backend** = `ShareRoom` DO in `worker/index.js`
+  (binding `SHARE`, SQLite migration in `wrangler.jsonc`); needs a live worker
+  (not the python devserver). Handoffs: `__aciiSharePath`, `__aciiShareJoin`.
 
 ### The app contract
 

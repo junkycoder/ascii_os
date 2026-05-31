@@ -28,6 +28,20 @@
   "kv_namespaces": [
     { "binding": "AUTH", "id": "482597e7e15f465cbf7e8d5066c2a3c6" }
   ],
+
+  // ── File share (Durable Object) ──────────────────────────────────────────
+  // One ShareRoom instance per room code holds the shared small files + the
+  // open WebSockets (live sync + WebRTC signaling). SQLite-backed storage so it
+  // works on every plan; new_sqlite_classes is required for a brand-new class.
+  "durable_objects": {
+    "bindings": [
+      { "name": "SHARE", "class_name": "ShareRoom" }
+    ]
+  },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["ShareRoom"] }
+  ],
+
   "vars": {
     "APP_URL": "https://os.fakan.cz",
     "MAIL_FROM": "FakanOS <login@fakan.cz>",
