@@ -3,30 +3,35 @@
 // API contract: see project CLAUDE.md — exports createApp(initialCtx, win).
 
 import { signal } from '../signals.js';
+import { createFS } from '../fs.js';
+import { createGit } from '../git.js';
+
+// Shared singletons (see CLAUDE.md): one FS + one git engine across all apps.
+const fs = globalThis.__aciiFS ||= createFS({ storageKey: 'acii.fs.v1' });
+const git = globalThis.__aciiGit ||= createGit(fs);
 
 const SCROLLBACK_CAP = 500;
-const PROMPT = 'acii> ';
 
-// ── fake filesystem for `ls` / `cat` ────────────────────────────────
-const FAKE_FILES = {
-  'about.md': [
-    '# FakanOS',
-    '',
-    'A tiny ASCII engine and shell that runs anywhere the web runs.',
-    'Zero dependencies. Pure DOM. ESM only.',
-  ].join('\n'),
-  'README.md': [
-    '# README',
-    '',
-    'Type `help` to see available commands.',
-    'Use the up/down arrows to cycle history.',
-    'PgUp / PgDn to scroll the scrollback.',
-  ].join('\n'),
-  'motd.txt': [
-    'Welcome to FakanOS.',
-    'All bits are imaginary; all glyphs are real.',
-  ].join('\n'),
-};
+// --- path helpers (UNIX-style, shared with fs.js conventions) -------------
+function normPath(p) {
+  if (!p || p === '/') return '/';
+  if (p[0] !== '/') p = '/' + p;
+  p = p.replace(/\/+/g, '/');
+  if (p.length > 1 && p.endsWith('/')) p = p.slice(0, -1);
+  return p;
+}
+function resolvePath(cwd, arg) {
+  if (!arg) return cwd;
+  let base = arg[0] === '/' ? arg : (cwd === '/' ? '/' + arg : cwd + '/' + arg);
+  const parts = base.split('/').filter(Boolean);
+  const stack = [];
+  for (const part of parts) {
+    if (part === '.') continue;
+    if (part === '..') { stack.pop(); continue; }
+    stack.push(part);
+  }
+  return '/' + stack.join('/');
+}
 
 const FORTUNES = [
   'A bug in the hand is worth two in the backlog.',
@@ -87,6 +92,22 @@ export function createApp(initialCtx, win) {
   const scrollback = [];
   let scrollOffset = 0; // 0 = stuck to bottom; >0 = scrolled up by N lines.
 
+  // Working directory over the shared virtual FS. The prompt reflects it (and
+  // the current branch when cwd is inside a repo, GitHub-Desktop style).
+  let cwd = '/';
+
+  // Build the prompt dynamically: "acii:<cwd> (<branch>)> ". When cwd is inside
+  // a git repo we show the active branch in parens — like a shell git prompt.
+  function promptStr() {
+    const repo = git.repoFor(cwd);
+    let branch = '';
+    if (repo) {
+      try { branch = ' (' + git.status(repo).branch + ')'; } catch {}
+    }
+    const shown = cwd.length > 18 ? '…' + cwd.slice(-17) : cwd;
+    return `acii:${shown}${branch}> `;
+  }
+
   // input
   let buffer = '';
   let cursor = 0; // index within buffer
@@ -120,8 +141,11 @@ export function createApp(initialCtx, win) {
       pushLine('available commands:', 'accent');
       pushLine('  help                 show this message');
       pushLine('  echo <text>          print text');
-      pushLine('  ls                   list fake files');
-      pushLine('  cat <file>           print a fake file');
+      pushLine('  pwd                  print working directory');
+      pushLine('  cd <dir>             change directory');
+      pushLine('  ls [dir]             list files in the virtual FS');
+      pushLine('  cat <file>           print a file');
+      pushLine('  git <cmd>            git: init/status/add/commit/branch/…', 'accent');
       pushLine('  clear | cls          clear the scrollback');
       pushLine('  uname                show system');
       pushLine('  date                 show current date');
@@ -132,21 +156,36 @@ export function createApp(initialCtx, win) {
       pushLine('  history              show command history');
     },
     echo(args) { pushLine(args.join(' ')); },
-    ls() {
-      // Two-column list.
-      const names = Object.keys(FAKE_FILES);
+    pwd() { pushLine(cwd); },
+    cd(args) {
+      const target = resolvePath(cwd, args[0] || '/');
+      if (!fs.exists(target)) { pushLine(`cd: ${args[0]}: No such file or directory`, 'error'); return; }
+      const st = fs.stat(target);
+      if (st && st.type !== 'dir') { pushLine(`cd: ${args[0]}: Not a directory`, 'error'); return; }
+      cwd = target;
+    },
+    ls(args) {
+      const target = resolvePath(cwd, args[0]);
+      if (!fs.exists(target)) { pushLine(`ls: ${args[0] || target}: No such file or directory`, 'error'); return; }
+      const st = fs.stat(target);
+      if (st && st.type === 'file') { pushLine(target.split('/').pop(), 'fg'); return; }
+      let entries = [];
+      try { entries = fs.list(target); } catch {}
+      if (!entries.length) { pushLine('(empty)', 'fgDim'); return; }
+      const names = entries.map(e => e.type === 'dir' ? e.name + '/' : e.name);
       pushLine(names.join('   '), 'link');
     },
     cat(args) {
       const name = args[0];
       if (!name) { pushLine('cat: missing file operand', 'error'); return; }
-      const file = FAKE_FILES[name];
-      if (file === undefined) {
-        pushLine(`cat: ${name}: No such file or directory`, 'error');
-        return;
-      }
-      pushLines(file.split('\n'));
+      const target = resolvePath(cwd, name);
+      if (!fs.exists(target)) { pushLine(`cat: ${name}: No such file or directory`, 'error'); return; }
+      const st = fs.stat(target);
+      if (st && st.type === 'dir') { pushLine(`cat: ${name}: Is a directory`, 'error'); return; }
+      try { pushLines(fs.readText(target).split('\n')); }
+      catch (err) { pushLine('cat: ' + (err?.message || err), 'error'); }
     },
+    git(args) { runGit(args); },
     clear() { scrollback.length = 0; scrollOffset = 0; },
     cls() { this.clear(); },
     uname() { pushLine('FakanOS 0.1 (web)'); },
@@ -163,10 +202,113 @@ export function createApp(initialCtx, win) {
     },
   };
 
+  // ── git subcommands (over the shared virtual git engine) ─────────
+  function requireRepo() {
+    const repo = git.repoFor(cwd);
+    if (!repo) { pushLine('fatal: not a git repository (use `git init`)', 'error'); return null; }
+    return repo;
+  }
+  function runGit(args) {
+    const sub = (args[0] || '').toLowerCase();
+    const rest = args.slice(1);
+    try {
+      switch (sub) {
+        case '': case 'help':
+          pushLine('usage: git <command>', 'accent');
+          pushLine('  init                 make the current dir a repo');
+          pushLine('  status               working-tree status');
+          pushLine('  add <path>|.         stage a file (or all with .)');
+          pushLine('  reset <path>         unstage a file');
+          pushLine('  commit -m <msg>      commit the staged changes');
+          pushLine('  log                  show commit history');
+          pushLine('  branch [name]        list or create branches');
+          pushLine('  checkout <name>      switch branch (-b to create)');
+          break;
+        case 'init': {
+          const repo = git.init(cwd);
+          pushLine('Initialized empty Git repository in ' + cwd + '/.git', 'success');
+          break;
+        }
+        case 'status': {
+          const repo = requireRepo(); if (!repo) break;
+          const s = git.status(repo);
+          pushLine('On branch ' + s.branch, 'accent');
+          if (s.clean) { pushLine('nothing to commit, working tree clean', 'success'); break; }
+          if (s.staged.length) {
+            pushLine('Changes to be committed:', 'success');
+            for (const e of s.staged) pushLine(`  ${nameForStatus(e.status)}: ${e.path}`, 'success');
+          }
+          if (s.unstaged.length) {
+            pushLine('Changes not staged for commit:', 'warning');
+            for (const e of s.unstaged) pushLine(`  ${nameForStatus(e.status)}: ${e.path}`, 'warning');
+          }
+          break;
+        }
+        case 'add': {
+          const repo = requireRepo(); if (!repo) break;
+          if (!rest.length) { pushLine('Nothing specified, nothing added.', 'error'); break; }
+          if (rest[0] === '.' || rest[0] === '-A' || rest[0] === '--all') { git.stageAll(repo); pushLine('staged all changes', 'fgDim'); break; }
+          for (const a of rest) {
+            const r = a.startsWith('/') ? a.replace(repo + '/', '') : a;
+            git.stage(repo, r);
+          }
+          break;
+        }
+        case 'reset': {
+          const repo = requireRepo(); if (!repo) break;
+          if (!rest.length) { git.unstageAll(repo); pushLine('unstaged all', 'fgDim'); break; }
+          for (const a of rest) git.unstage(repo, a);
+          break;
+        }
+        case 'commit': {
+          const repo = requireRepo(); if (!repo) break;
+          // accept: commit -m "msg"  /  commit -m msg…
+          let msg = '';
+          const mi = rest.indexOf('-m');
+          if (mi >= 0) msg = rest.slice(mi + 1).join(' ').replace(/^["']|["']$/g, '');
+          if (!msg) { pushLine('error: commit message required (-m "msg")', 'error'); break; }
+          const id = git.commit(repo, msg);
+          pushLine(`[${git.status(repo).branch} ${id.slice(0, 7)}] ${msg}`, 'success');
+          break;
+        }
+        case 'log': {
+          const repo = requireRepo(); if (!repo) break;
+          const entries = git.log(repo);
+          if (!entries.length) { pushLine('(no commits yet)', 'fgDim'); break; }
+          for (const c of entries) {
+            pushLine('commit ' + c.id, 'warning');
+            pushLine('  ' + c.author, 'fgDim');
+            pushLine('  ' + new Date(c.time).toLocaleString(), 'fgDim');
+            pushLine('    ' + c.message.split('\n')[0]);
+          }
+          break;
+        }
+        case 'branch': {
+          const repo = requireRepo(); if (!repo) break;
+          if (!rest.length) {
+            const { list } = git.branches(repo);
+            for (const b of list) pushLine((b.current ? '* ' : '  ') + b.name, b.current ? 'accent' : 'fg');
+          } else { git.createBranch(repo, rest[0]); pushLine('created branch ' + rest[0], 'fgDim'); }
+          break;
+        }
+        case 'checkout': {
+          const repo = requireRepo(); if (!repo) break;
+          if (rest[0] === '-b') { git.createBranch(repo, rest[1], { checkout: true }); pushLine("Switched to a new branch '" + rest[1] + "'", 'success'); break; }
+          git.checkout(repo, rest[0]);
+          pushLine("Switched to branch '" + rest[0] + "'", 'success');
+          break;
+        }
+        default:
+          pushLine(`git: '${sub}' is not a git command. See 'git help'.`, 'error');
+      }
+    } catch (err) { pushLine('git: ' + (err?.message || err), 'error'); }
+  }
+  function nameForStatus(s) { return s === 'A' ? 'new file ' : s === 'D' ? 'deleted  ' : 'modified '; }
+
   function run(input) {
     const line = input.trim();
     // Always echo the prompt + input into scrollback for history feel.
-    pushLine(PROMPT + input, 'fgDim');
+    pushLine(promptStr() + input, 'fgDim');
     if (!line) return;
     history.push(input);
     const parts = line.split(/\s+/);
@@ -248,6 +390,7 @@ export function createApp(initialCtx, win) {
     // so the cursor stays visible.
     const promptStyle = styleFor(theme, 'accent');
     const textStyle = styleFor(theme, 'fg');
+    const PROMPT = promptStr();
     ctx.text(0, promptRow, PROMPT, promptStyle);
 
     const inputStartCol = PROMPT.length;
