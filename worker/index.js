@@ -211,30 +211,31 @@ async function authVerify(request, env) {
   await env.AUTH.put(userKey, JSON.stringify(user));
 
   // Invite → join the owner's collaborative room and remember it on the session.
-  let room = null;
+  let room = null, rights = null;
   if (isInvite && env.COLLAB) {
     room = m.room;
+    rights = m.rights === 'read' ? 'read' : 'write';
     try {
       const stub = env.COLLAB.get(env.COLLAB.idFromName(room));
       await stub.fetch('https://collab/join', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ owner: room, userId: id, nick: user.username, rights: m.rights === 'read' ? 'read' : 'write' }),
+        body: JSON.stringify({ owner: room, userId: id, nick: user.username, rights }),
       });
     } catch (_) { /* presence still works; membership best-effort */ }
   }
 
   const sid = randToken();
-  await env.AUTH.put('session:' + sid, JSON.stringify({ id, email, username: user.username, room }), { expirationTtl: SESSION_TTL });
+  await env.AUTH.put('session:' + sid, JSON.stringify({ id, email, username: user.username, room, rights }), { expirationTtl: SESSION_TTL });
 
-  return json({ token: sid, user: { id, email, name: user.username }, room });
+  return json({ token: sid, user: { id, email, name: user.username }, room, rights });
 }
 
-// GET /api/auth/me  (Authorization: Bearer <sid>) → { user, room } or 401.
+// GET /api/auth/me  (Authorization: Bearer <sid>) → { user, room, rights } or 401.
 async function authMe(request, env) {
   const s = await sessionFor(env, bearer(request));
   if (!s) return json({ error: 'invalid session' }, 401);
-  return json({ user: { id: s.id, email: s.email, name: s.username }, room: s.room || null });
+  return json({ user: { id: s.id, email: s.email, name: s.username }, room: s.room || null, rights: s.rights || null });
 }
 
 // Send the magic link via Resend (https://resend.com). Requires a verified
@@ -527,10 +528,12 @@ export class CollabRoom {
 
   async fetch(request) {
     const url = new URL(request.url);
-    const action = url.pathname.split('/').filter(Boolean)[0] || '';
+    const parts = url.pathname.split('/').filter(Boolean);
+    const action = parts[0] || '';
     if (action === 'join') return this.join(request);
     if (action === 'members') return this.members();
     if (action === 'ws') return this.handleWs(request);
+    if (action === 'fs') return this.handleFs(parts[1] || '', request, url);
     return json({ error: 'not found' }, 404);
   }
 
@@ -568,14 +571,81 @@ export class CollabRoom {
     const owner = q.get('owner') || (await this.state.storage.get('owner')) || '';
     if (owner && !(await this.state.storage.get('owner'))) await this.state.storage.put('owner', owner);
     const role = userId === owner ? 'owner' : 'host';
+    const rights = await this.rightsOf(userId, owner);
 
     const pair = new WebSocketPair();
     const client = pair[0], server = pair[1];
     this.state.acceptWebSocket(server);
     server.serializeAttachment({ userId, nick, role });
-    server.send(JSON.stringify({ type: 'hello', you: { userId, nick, role }, roster: this.roster() }));
+    server.send(JSON.stringify({ type: 'hello', you: { userId, nick, role, rights }, roster: this.roster() }));
     this.broadcastExcept(userId, { type: 'roster', roster: this.roster() });
     return new Response(null, { status: 101, webSocket: client });
+  }
+
+  // Can this user write the shared desktop? The owner always; a host only if
+  // their invite granted write rights.
+  async rightsOf(userId, owner) {
+    if (userId && userId === owner) return 'write';
+    const m = await this.state.storage.get('member:' + userId);
+    return (m && m.rights === 'write') ? 'write' : 'read';
+  }
+
+  // ── Shared desktop FS (two-way; owner's /desktop ⇄ /room/<owner>/) ──
+  //   GET    fs/manifest          → { files:[{path,name,mime,size,mtime,hash}] }
+  //   GET    fs/file?path=        → bytes (text as string, binary as ArrayBuffer)
+  //   PUT    fs/file?path=        → store + broadcast (write rights required)
+  //   DELETE fs/file?path=        → remove + broadcast (write rights required)
+  async handleFs(sub, request, url) {
+    const uid = url.searchParams.get('uid') || '';
+    const owner = url.searchParams.get('owner') || (await this.state.storage.get('owner')) || '';
+    if (sub === 'manifest') return this.fsManifest();
+    if (sub === 'file') {
+      const path = url.searchParams.get('path') || '';
+      if (request.method === 'GET') return this.fsGet(path);
+      const canWrite = (await this.rightsOf(uid, owner)) === 'write';
+      if (!canWrite) return json({ error: 'read-only' }, 403);
+      if (request.method === 'PUT') return this.fsPut(path, request);
+      if (request.method === 'DELETE') return this.fsDelete(path);
+    }
+    return json({ error: 'not found' }, 404);
+  }
+
+  async fsManifest() {
+    const map = await this.state.storage.list({ prefix: 'f:' });
+    const files = [];
+    for (const v of map.values()) files.push({ path: v.path, name: v.name, mime: v.mime, size: v.size, mtime: v.mtime, hash: v.hash });
+    files.sort((a, b) => a.path.localeCompare(b.path));
+    return json({ files });
+  }
+
+  async fsGet(path) {
+    if (!path) return json({ error: 'no path' }, 400);
+    const f = await this.state.storage.get('f:' + path);
+    if (!f) return json({ error: 'not found' }, 404);
+    return new Response(f.data, { headers: { 'content-type': f.mime || 'application/octet-stream', 'cache-control': 'no-store' } });
+  }
+
+  async fsPut(path, request) {
+    if (!path || path.length > 1024) return json({ error: 'bad path' }, 400);
+    const buf = await request.arrayBuffer();
+    if (buf.byteLength > SHARE_MAX_FILE) return json({ error: 'file too large', max: SHARE_MAX_FILE }, 413);
+    const mime = request.headers.get('content-type') || 'application/octet-stream';
+    const isText = mime.startsWith('text/') || mime.includes('json') || mime.includes('xml') || mime.includes('svg');
+    const mtime = Number(request.headers.get('x-mtime')) || Date.now();
+    const hash = request.headers.get('x-hash') || '';
+    const existing = await this.state.storage.get('f:' + path);
+    const meta = { path, name: path.split('/').pop(), mime, size: buf.byteLength, mtime, hash };
+    const data = isText ? new TextDecoder().decode(buf) : buf;
+    await this.state.storage.put('f:' + path, { ...meta, data });
+    this.broadcast({ type: 'fs', op: existing ? 'updated' : 'added', file: meta });
+    return json({ ok: true, file: meta });
+  }
+
+  async fsDelete(path) {
+    if (!path) return json({ error: 'no path' }, 400);
+    const had = await this.state.storage.delete('f:' + path);
+    if (had) this.broadcast({ type: 'fs', op: 'deleted', path });
+    return json({ ok: true });
   }
 
   roster() {

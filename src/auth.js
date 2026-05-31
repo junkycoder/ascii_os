@@ -58,12 +58,12 @@ export function getSession() {
     // A real session has a server token; a guest session has guest:true and no
     // token (local-only, never validated against the server).
     if (!s || !s.user || (!s.token && !s.guest)) return null;
-    return { token: s.token || null, guest: !!s.guest, room: s.room || null, at: s.at, user: decorate(s.user) };
+    return { token: s.token || null, guest: !!s.guest, room: s.room || null, rights: s.rights || null, at: s.at, user: decorate(s.user) };
   } catch { return null; }
 }
 
-export function saveSession(token, user, room) {
-  const s = { token, guest: false, user: decorate(user), room: room || null, at: Date.now() };
+export function saveSession(token, user, room, rights) {
+  const s = { token, guest: false, user: decorate(user), room: room || null, rights: rights || null, at: Date.now() };
   try { localStorage.setItem(SESSION_KEY, JSON.stringify(s)); } catch {}
   return s;
 }
@@ -120,7 +120,7 @@ export async function peek(token) {
 export async function verify(token, nick) {
   const data = await postJSON('/verify', { token: String(token || ''), nick: String(nick || '') });
   if (!data.token || !data.user) throw new Error('bad verify response');
-  return saveSession(data.token, data.user, data.room || null);
+  return saveSession(data.token, data.user, data.room || null, data.rights || null);
 }
 
 // Revalidate the stored session against the server. Returns the (refreshed)
@@ -135,7 +135,7 @@ export async function refresh() {
     if (res.status === 401) { clearSession(); return null; }
     if (!res.ok) return s;
     const data = await res.json().catch(() => null);
-    if (data && data.user) return saveSession(s.token, data.user, data.room != null ? data.room : s.room);
+    if (data && data.user) return saveSession(s.token, data.user, data.room != null ? data.room : s.room, data.rights != null ? data.rights : s.rights);
     return s;
   } catch { return s; }
 }

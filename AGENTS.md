@@ -90,8 +90,11 @@ signals → engine → { fs, user, drafts, themes } → { wm, ui, ui-menu, markd
   existing accounts go straight in. `verify` records DO membership + persists
   `room` on the session. The `CollabRoom` DO (binding `COLLAB`) serves **live
   presence** (who's here + cursors) over a WebSocket; the shell renders it from
-  `opts.collab`. **Only phase 1+2 (presence + invite/identity) exists — shared
-  content / window replication and co-editing are NOT built yet.**
+  `opts.collab`. **Phase 3 (shared desktop FS) is in:** `src/collabsync.js`
+  (`createDesktopSync`) mirrors the owner's `/desktop` ⇄ joiners' `/room/<owner>/`
+  two-way (write-rights gated, last-write-wins, loop-safe shadow map) — the DO
+  stores files + relays `{type:'fs',op}` on the presence WS. **Window/app
+  replication + co-editing CRDT (phase 4) are NOT built yet.**
 
 ### The app contract
 

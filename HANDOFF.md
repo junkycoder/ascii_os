@@ -176,8 +176,15 @@ menu, or spacebar (Quick-Look) on the selection.
     live presence over a WebSocket. `src/collab.js` (`createCollabClient`) +
     `shell.js` overlay: remote cursors + a "who's here" strip + owner-only
     "Invite to desktop…" in the user-chip menu.
-- **NOT built yet:** phase 3 (shared FS / window + content replication — today a
-  joiner sees presence but still their own FS) and phase 4 (co-editing CRDT).
+- **Phase 3 (shared desktop FS) — landed (`claude/collab-desktop-fs`):** the
+  owner's `/desktop` mirrors into the room and shows to joiners under
+  `/room/<owner>/` (browse via Findman). **Two-way**: a host invited with write
+  rights edits their copy → CollabRoom DO → broadcast → owner applies into
+  `/desktop` (and vice-versa); last-write-wins. `src/collabsync.js`
+  (`createDesktopSync`) runs a loop-safe shadow-map reconcile; the DO stores
+  files as `f:<rel>` + relays `{type:'fs',op}` on the presence WS; invite rights
+  ride the session. **NOT built:** window/app replication + co-editing CRDT
+  (phase 4). Like the rest of collab, **unverified against a live DO.**
 - **Deploy prereq:** the v2 DO migration (`new_sqlite_classes:["CollabRoom"]`)
   applies on the next `wrangler deploy` / `trunk` push; needs Durable Objects
   enabled (same as share). **Not verified against a live DO** (python devserver

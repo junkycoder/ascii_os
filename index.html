@@ -232,19 +232,29 @@
         import('./src/apps/share.js' + V),
       ]);
 
-      // Collaborative desktop: connect this user to their room's presence so the
-      // shell can show who's here + live cursors. The room is the owner's user id
-      // (a remembered invite carries someone else's room; otherwise it's our own).
-      let collabConn = null, collabClient = null;
+      // Collaborative desktop: connect this user to their room's presence (who's
+      // here + live cursors) AND sync the shared desktop FS. The room is the
+      // owner's user id (a remembered invite carries someone else's room). The
+      // owner's /desktop mirrors into the room; joiners see it under /room/<owner>/.
+      let collabConn = null, collabClient = null, collabSync = null;
       const sess = auth.getSession();
       const room = (sess && sess.room) || user.id;
       const isOwner = room === user.id;
+      const canWrite = isOwner || (sess && sess.rights === 'write');
       if (sess && sess.token) {
         try {
-          const { createCollabClient } = await import('./src/collab.js' + V);
+          const [{ createCollabClient }, { createDesktopSync }] = await Promise.all([
+            import('./src/collab.js' + V),
+            import('./src/collabsync.js' + V),
+          ]);
           collabClient = createCollabClient();
-          collabConn = collabClient.connect(room, sess.token, {});
-        } catch (e) { console.warn('collab presence unavailable', e); }
+          collabSync = createDesktopSync({
+            fs: globalThis.__aciiFS, client: collabClient,
+            room, token: sess.token, isOwner, canWrite,
+          });
+          collabConn = collabClient.connect(room, sess.token, { onFs: (m) => collabSync.onRemote(m) });
+          collabSync.start();
+        } catch (e) { console.warn('collab unavailable', e); }
       }
 
       const appRegistry = [
