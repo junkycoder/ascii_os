@@ -1,4 +1,4 @@
-# HANDOFF — acii_os
+# HANDOFF — FakanOS
 
 Running log of what works and what's still open. Pair with `CLAUDE.md` /
 `AGENTS.md` (project rules + conventions) and `README.md` (the map).

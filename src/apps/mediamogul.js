@@ -1,4 +1,4 @@
-// mediamogul.js — "Media House", a READ-ONLY media browser for acii_os.
+// mediamogul.js — "Media House", a READ-ONLY media browser for FakanOS.
 //
 // Replaces the old Video app. Left pane: a Findman-style tree of the virtual
 // FS, filtered to media files only (video / image / audio), with a "+ mount

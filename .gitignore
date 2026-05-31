@@ -1,4 +1,4 @@
-# acii_os — no build step, zero deps, nothing to ignore from tooling.
+# FakanOS — no build step, zero deps, nothing to ignore from tooling.
 # These are just defensive entries for editor / OS cruft.
 
 .DS_Store

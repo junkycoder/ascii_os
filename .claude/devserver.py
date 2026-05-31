@@ -87,7 +87,7 @@ def main():
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 8765
     bind = sys.argv[2] if len(sys.argv) > 2 else "0.0.0.0"
     with ThreadingHTTPServer((bind, port), NoCacheHandler) as srv:
-        print(f"acii_os dev server: http://{bind}:{port}/")
+        print(f"FakanOS dev server: http://{bind}:{port}/")
         srv.serve_forever()
 
 

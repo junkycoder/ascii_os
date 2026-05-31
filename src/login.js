@@ -1,4 +1,4 @@
-// acii_os login screen — email + username, magic-link sign-in.
+// FakanOS login screen — email + username, magic-link sign-in.
 //
 // Renders straight into the engine grid (like the shell) and owns its own
 // input handlers while active. The flow:
@@ -95,7 +95,7 @@ export function createLogin(engine, opts = {}) {
     engine.rect(L.px, L.py, L.W, L.H, { ch: ' ', fg: c.fg, bg: c.bg });
     engine.box(L.px, L.py, L.W, L.H, { fg: c.border, glyphSet: 'borderDouble' });
 
-    const title = 'a c i i _ o s';
+    const title = 'F a k a n O S';
     engine.text(L.px + Math.floor((L.W - title.length) / 2), L.titleY, title, { fg: c.accent, bold: true });
 
     if (phase === 'sent') return renderSent(L, c);

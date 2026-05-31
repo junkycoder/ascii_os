@@ -1,4 +1,4 @@
-# AGENTS.md — working on acii_os
+# AGENTS.md — working on FakanOS
 
 Guide for any AI coding agent (Claude Code, Codex, Cursor, …) working in this
 repo, **together with the user**. `CLAUDE.md` carries the same project rules in
@@ -9,7 +9,7 @@ for the live state and the feature backlog before you touch anything.
 
 ## What this project is
 
-acii_os is an **ASCII-first, OS-flavored UI framework for the web**: a reactive
+FakanOS is an **ASCII-first, OS-flavored UI framework for the web**: a reactive
 grid renderer + window manager + a fleet of desktop apps, all rendered as
 **copyable monospace text in the DOM**. It boots from `index.html`, which imports
 `src/*.js` as native ES modules. There is **nothing to compile**.

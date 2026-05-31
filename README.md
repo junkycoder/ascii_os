@@ -1,4 +1,4 @@
-# acii_os
+# FakanOS
 
 An **ASCII-first, operating-system-flavored UI framework for the web** — a
 reactive grid renderer, a window manager, and a small fleet of desktop apps, all
@@ -7,7 +7,7 @@ build step. No TypeScript.** Runs anywhere the web runs: desktop, mobile (touch)
 TV — and, via a thin Capacitor wrapper, as a native iOS app.
 
 ```
-╔═ acii_os ════════════════════════════════════════╗
+╔═ FakanOS ════════════════════════════════════════╗
 ║  ╭────╮   ╭────╮   ╭────╮      ┌─ Terminal ──[×]┐ ║
 ║  │ ▸  │   │ $  │   │ ✎  │      │ acii> help      │ ║
 ║  ╰────╯   ╰────╯   ╰────╯      │ available cmds… │ ║
@@ -43,7 +43,7 @@ imports `src/*.js` as native ES modules.
 
 ## What it is
 
-acii_os draws an entire desktop environment into **one DOM cell grid**: every
+FakanOS draws an entire desktop environment into **one DOM cell grid**: every
 character is a `<span>` in a row, the renderer diffs cells frame-to-frame, and a
 30 fps loop paints only what changed. No `<canvas>`, no SVG — so all text stays
 selectable, copyable, and accessible. A tiny reactive core (`signal` /

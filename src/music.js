@@ -1,4 +1,4 @@
-// music.js — a tiny dependency-free music player engine for acii_os.
+// music.js — a tiny dependency-free music player engine for FakanOS.
 //
 // Two open sources, switchable:
 //   • disk  — audio files from the virtual FS (and mounted folders)

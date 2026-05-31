@@ -1,4 +1,4 @@
-// Draft / auto-backup store for acii_os.
+// Draft / auto-backup store for FakanOS.
 //
 // Keeps the LAST unsaved edit per file path so a reopen (after reload or crash)
 // can restore in-progress text. Backed by localStorage under its own key, with

@@ -1,4 +1,4 @@
-// acii_os keymap — a global prefix-key (leader) scheme + Quick-Look helpers.
+// FakanOS keymap — a global prefix-key (leader) scheme + Quick-Look helpers.
 //
 // One consistent way to bind system-level shortcuts so they don't collide with
 // per-app keys:

@@ -4,7 +4,7 @@
 # committed assets/ios/ dir; `tools/ios-postsync.mjs` copies it into the
 # .gitignored ios/ asset catalog after every `cap sync` / `cap copy`.
 #
-# Design: acii_os brand — a glowing green ">" terminal prompt + block cursor on
+# Design: FakanOS brand — a glowing green ">" terminal prompt + block cursor on
 # a near-black field (accent #00ff88, bg #0d0d0d / splash #000000). Menlo font.
 #
 # Usage: bash tools/gen-app-assets.sh    (requires `magick`; macOS has Menlo)

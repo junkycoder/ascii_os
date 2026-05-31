@@ -1,4 +1,4 @@
-// ui.js — foundational UI components for acii_os
+// ui.js — foundational UI components for FakanOS
 //
 // Each factory returns a component with:
 //   render(ctx)   — draw to a sub-context or engine. Uses ABSOLUTE coords passed at create-time.
