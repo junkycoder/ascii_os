@@ -84,6 +84,18 @@ Verified functional end-to-end:
     Findman-style tree filtered to video/image/audio + ASCII rendering of the
     selection + link to the original. No URL prompt, no editing.
   - **gamemaker** — grid editor + play mode (player/wall/goal/enemy), persisted.
+  - **feedback** — public feedback board. Anyone can read; only a signed-in
+    account with a **verified email** (guests can't) can post. Form: category
+    (bug/idea/praise/other) · multi-line message · reply-to email (prefilled from
+    the account) · auto-attached context (serving host, theme, responsive mode,
+    platform). List view (`N` new, `R` refresh, ↑↓ select, detail pane shows the
+    selected note + its context); compose view (`Tab` cycles category/message/
+    contact fields, `Ctrl/Cmd+Enter` sends, `Esc` cancels). Backend =
+    `worker/index.js` `/api/feedback` (`GET …/list` public, no emails leaked;
+    `POST` needs the session bearer, throttled per account) — stored as one
+    capped JSON blob (`feedback:v1`) in the **same `AUTH` KV** as auth, and the
+    author gets a themed thank-you email via **Resend**. No new infra: reuses the
+    live KV + RESEND_API_KEY, so it works in production as soon as it deploys.
   - **share** — Durable-Object file share (local→DO→locals). Create a room
     (you're the source) or join by code; small files (≤256 KiB) live in the
     per-code `ShareRoom` DO and sync **live over a WebSocket**; bigger files go

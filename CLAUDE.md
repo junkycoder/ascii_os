@@ -51,10 +51,11 @@ src/shell.js     desktop shell — wires engine+wm+apps, icons, taskbar, widgets
 src/share.js     file-share client: DO room (local→DO→locals) over /api/share/*,
                  WS live sync + WebRTC tunnel (createShareClient / createTunnel)
 src/apps/*.js    apps: terminal, snake, notes, paint, readme, findman,
-                 mediamogul (Media House), gamemaker, share
+                 mediamogul (Media House), gamemaker, share, feedback
 index.html       boots engine → login → shell (dynamic imports with ?v= cache-bust)
 bench.html       standalone perf benchmark
-worker/index.js  Cloudflare Worker entry: serves ASSETS, /api/auth/*, /api/share/*
+worker/index.js  Cloudflare Worker entry: serves ASSETS, /api/auth/*,
+                 /api/feedback/* (public board, KV-backed), /api/share/*
                  (ShareRoom Durable Object), /api/newfish/* proxy
 wrangler.jsonc   Cloudflare config (assets from repo root, no build)
 .claude/devserver.py   dev server with Cache-Control: no-store
