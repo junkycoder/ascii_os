@@ -1191,6 +1191,34 @@ export function createShell(engine, opts = {}) {
     return openOrFocus('gitdesk');
   }
 
+  // Register a folder as a git repo (creating it if needed) and open it.
+  function addRepo() {
+    const input = window.prompt('Cesta ke složce repozitáře:', '/desktop/');
+    if (!input) return;
+    const path = '/' + input.replace(/^\/+|\/+$/g, '');
+    if (path === '/') { window.alert('Zadej cestu ke složce, ne kořen /.'); return; }
+    try {
+      fs.mkdir(path);
+      git.init(path);          // no-op if it's already a repo
+      git.setActive(path);
+      openGit(path);
+    } catch (err) { window.alert(err.message); }
+  }
+
+  // Git submenu: one entry per existing repo (each opens Git Desk pointed at
+  // it), then "Add repository…". A repo is just a folder, so any number of them
+  // can live side by side under the virtual FS.
+  function gitMenuItems() {
+    const repos = git.listRepos();
+    const items = repos.map(r => ({
+      label: r.replace(/^\//, '') || r,   // e.g. "desktop", "desktop/notes"
+      onSelect: () => openGit(r),
+    }));
+    if (repos.length) items.push({ type: 'separator' });
+    items.push({ label: 'Add repository…', onSelect: addRepo });
+    return items;
+  }
+
   function setWallpaper(path) {
     wallpaperPath.value = path;
     bumpSave();
@@ -1286,17 +1314,7 @@ export function createShell(engine, opts = {}) {
             fs.mkdir(name);
           } },
         { label: 'Open Findman',   onSelect: () => openOrFocus('findman') },
-        { label: 'Git',
-          items: [
-            ...(git.isRepo('/desktop')
-              ? [{ label: 'Open Git Desk', onSelect: () => openGit('/desktop') }]
-              : [{ label: 'Initialize repo here', onSelect: () => {
-                    fs.mkdir('/desktop');
-                    try { git.init('/desktop'); openGit('/desktop'); } catch (err) { window.alert(err.message); }
-                  } }]),
-            { label: 'Open Git Desk…', onSelect: () => openGit() },
-          ],
-        },
+        { label: 'Git', items: gitMenuItems() },
         { type: 'separator' },
         { label: 'Background',
           items: Object.keys(PATTERNS).map(p => ({
