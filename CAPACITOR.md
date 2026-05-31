@@ -222,3 +222,28 @@ target (a žádná změna v repu). Pravý nativní mac build by znamenal jinou c
 `npm run sync` potřebuje **Node ≥ 18** (Capacitor 6 CLI) + CocoaPods na PATH —
 lokálně přes nvm `node v22` a `LANG=en_US.UTF-8` (jinak padá pod/Node). V CI to
 řeší `ci_post_clone.sh` (brew node@20). Po `sync` jde `npm run ios:open` a Run.
+
+---
+
+## 9. Živý web z `os.fakan.cz` + offline fallback
+
+Appka **nenačítá zabundlovaný web jako primární zdroj** — `capacitor.config.json`
+má `server.url: "https://os.fakan.cz"`, takže WKWebView táhne web rovnou z
+produkce. **Deploy na `trunk` (Cloudflare) se v appce projeví bez rebuildu** —
+stačí appku znovu otevřít. Rebuild / `npm run sync` je potřeba už jen na nativní
+změny (config, pluginy, ikona, `Info.plist`).
+
+- **Capacitor most funguje i s remote URL** — `window.Capacitor` se injektuje do
+  vzdálené stránky, takže `src/mobile.js`, splash, status bar i deeplinky jedou
+  dál. Universal Links (`/.well-known/apple-app-site-association`) se týkají
+  domény `os.fakan.cz`, což teď sedí 1:1.
+- **Offline fallback (nativní):** `ios/App/App/RemoteWebViewController.swift`
+  (subclass `CAPBridgeViewController`, nastaven ve storyboardu jako `customClass`)
+  v `instanceDescriptor()` **při startu** ověří reachability hostu. Když je
+  zařízení offline → `descriptor.serverURL = nil` → Capacitor servíruje
+  **zabundlovaný `www/`** (`App/App/public` z posledního `cap sync`) z
+  `capacitor://localhost`. Online → živý remote.
+- **Mez:** rozhodnutí padá jen jednou při studeném startu (čistý hook, nebojuje
+  s navigation delegatem bridge). Když appka při běhu ztratí síť, načtená
+  stránka zůstává; tvrdý reload bez sítě by spadl na bundle. Bundle je z
+  posledního `sync`, takže offline = případně starší build (povaha fallbacku).

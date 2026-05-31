@@ -3,6 +3,10 @@
   "appName": "FakanOS",
   "webDir": "www",
   "backgroundColor": "#000000",
+  "server": {
+    "url": "https://os.fakan.cz",
+    "cleartext": false
+  },
   "ios": {
     "contentInset": "never",
     "scrollEnabled": false,
