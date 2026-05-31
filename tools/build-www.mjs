@@ -46,12 +46,9 @@ function replaceOnce(re, repl, label) {
   log('patched', label);
 }
 
-// 3a. viewport-fit=cover so content can extend under the notch / safe areas.
-replaceOnce(
-  /(<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no)("\s*\/?>)/,
-  '$1,viewport-fit=cover$2',
-  'viewport-fit=cover'
-);
+// 3a. (removed) viewport-fit=cover now lives in the canonical index.html — the
+//     iOS app loads that page live from os.fakan.cz, so mobile tweaks must ship
+//     in source, not as a www-only build patch. www/ inherits it via the copy.
 
 // 3b. fixed cache-bust stamp instead of per-load Date.now().
 replaceOnce(
@@ -60,19 +57,9 @@ replaceOnce(
   'cache-bust stamp'
 );
 
-// 3c. load + init mobile.js right after the engine starts — BEFORE login — so
-//     the native splash hides as soon as ANY UI (login screen or shell) is up,
-//     not only after a successful login (which left first-launch users staring
-//     at the splash forever). Browser-safe: the module no-ops without Capacitor.
-//     The back handler in mobile.js resolves the shell lazily from window.shell.
-replaceOnce(
-  /(\n[ \t]*engine\.start\(\);)/,
-  "$1\n    // mobile: native Capacitor integration (no-op in a plain browser)\n" +
-  "    import('./src/mobile.js' + V)\n" +
-  "      .then((m) => m.initMobile && m.initMobile(engine))\n" +
-  "      .catch(() => {});",
-  'mobile.js loader'
-);
+// 3c. (removed) the mobile.js loader now lives in the canonical index.html so
+//     the live page served from os.fakan.cz hides the native splash itself.
+//     Patching it in here too would double-inject into www/.
 
 // 3d. tiny safe-area belt-and-suspenders: black background already covers the
 //     inset area; viewport-fit=cover + contentInset:always (capacitor.config)
