@@ -210,6 +210,29 @@ export function createGit(fs) {
     return st;
   }
 
+  // --- clone -------------------------------------------------------------
+  // Materialize an externally-fetched file set into `dest`, make it a repo, and
+  // record the fetched tree as the initial commit so the working tree is clean
+  // right after. `files` is [{ path, data }] with `data` anything fs.write
+  // accepts (string | Uint8Array). The network fetch lives in the shell — this
+  // stays FS-only, like the rest of the engine. Returns the repo root path.
+  function clone(dest, files, { message } = {}) {
+    dest = norm(dest);
+    if (dest === '/') throw new Error('Refusing to clone into /');
+    fs.mkdir(dest);
+    for (const f of files || []) {
+      if (!f || !f.path) continue;
+      const r = String(f.path).replace(/^\/+/, '');
+      if (!r || r === GIT_DIR || r.startsWith(GIT_DIR + '/')) continue; // never overwrite .git
+      try { fs.write(abs(dest, r), f.data); } catch {}
+    }
+    init(dest);
+    stageAll(dest);
+    try { commit(dest, message || ('Clone into ' + dest)); } catch {} // empty repo → no commit
+    setActive(dest);
+    return dest;
+  }
+
   // --- status ------------------------------------------------------------
   // Two-area model: head ⇄ index = "staged"; index ⇄ working = "unstaged".
   // Untracked = present in working, absent from both index and head.
@@ -462,6 +485,7 @@ export function createGit(fs) {
     repoFor,
     listRepos,
     init,
+    clone,
     status,
     activeStatus,
     diff,
