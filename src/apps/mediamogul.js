@@ -6,8 +6,8 @@
 // selected item plus a link to the original file path.
 //
 // Reuses media.js:
-//   imageToAscii      — images → static ASCII frame
-//   createVideoPlayer — off-DOM <video> → canvas → ASCII frames (play/pause/seek)
+//   imageToCells      — images → static half-block frame (▀, fg/bg per cell)
+//   createVideoPlayer — off-DOM <video> → canvas → half-block frames (play/pause/seek)
 //   createAudio       — long-track player for audio (play/stop, no ASCII picture)
 //
 // No URL prompt, no editing. Picks up globalThis.__aciiOpenFile and selects it.
@@ -17,7 +17,14 @@
 
 import { signal } from '../signals.js';
 import { createFS } from '../fs.js';
-import { imageToAscii, createVideoPlayer, createAudio } from '../media.js';
+import { imageToCells, createVideoPlayer, createAudio } from '../media.js';
+
+// Picture/video render strategies (cycled with R in preview focus):
+//   half    — ▀ half-block, two colored pixels per cell (fg=top, bg=bottom).
+//             2× vertical res, the default. Draw loops honour cell.bg.
+//   braille — ⠿ 2×4 dot matrix, one color per cell. High-density, line-art look.
+//   ascii   — classic brightness ramp, one char per cell. Sparsest, most "text".
+const RENDER_MODES = ['half', 'braille', 'ascii'];
 
 const fs = globalThis.__aciiFS ||= createFS({ storageKey: 'acii.fs.v1' });
 
@@ -95,7 +102,11 @@ export function createApp(initialCtx, win) {
   let loadedKind = null;         // 'video' | 'image' | 'audio'
   let loadError = null;
 
-  // Image: a static 2D array of { ch, fg } cells.
+  // Active render strategy for the picture area (see RENDER_MODES). Instance
+  // state so each Media House window cycles independently.
+  let renderMode = 'half';
+
+  // Image: a static 2D array of { ch, fg, bg } cells.
   let imageCells = null;
   let imageReqW = 0, imageReqH = 0;     // dims last requested (to detect resize)
   let imageLoading = false;
@@ -107,6 +118,8 @@ export function createApp(initialCtx, win) {
   let lastFrame = null;
   let playerW = 0, playerH = 0;
   let videoMuted = false;   // play .mp4 with sound by default (M toggles)
+  let pendingSeek = null;   // on a respawn (e.g. mode toggle), restore this time…
+  let pendingPlay = false;  // …and resume playing only if it was playing before
 
   // Audio: a media.js audio context + music handle.
   let audio = null;
@@ -357,7 +370,7 @@ export function createApp(initialCtx, win) {
     if (player) { try { player.destroy(); } catch (_) {} player = null; }
     try {
       player = createVideoPlayer({
-        src: playerSrc, width: W, height: H, color: 'rgb', fps: 15,
+        src: playerSrc, width: W, height: H, mode: renderMode, fps: 15,
         muted: videoMuted, volume: 1,
       });
     } catch (err) {
@@ -368,13 +381,17 @@ export function createApp(initialCtx, win) {
     lastFrame = null;
     player.onFrame((cells) => { lastFrame = cells; });
 
-    // Autoplay once metadata is ready (muted, so browsers usually allow it).
+    // Once metadata is ready (muted, so browsers usually allow autoplay):
+    // a fresh load autoplays; a respawn (mode toggle) restores time + play state.
     let kicked = false;
     const t = setInterval(() => {
       if (kicked || !player) { clearInterval(t); return; }
       if (player.duration.peek() > 0) {
         kicked = true;
-        player.play().catch(() => setStatus('autoplay blocked — press SPACE', 2500));
+        if (pendingSeek != null) { try { player.seek(pendingSeek); } catch (_) {} }
+        const shouldPlay = pendingSeek != null ? pendingPlay : true;
+        pendingSeek = null;
+        if (shouldPlay) player.play().catch(() => setStatus('autoplay blocked — press SPACE', 2500));
         clearInterval(t);
       }
     }, 80);
@@ -394,8 +411,8 @@ export function createApp(initialCtx, win) {
         if (!u) { imageLoading = false; return; }
         imageSrcUrl = u;
       }
-      const out = await imageToAscii(imageSrcUrl, {
-        width: W, height: H, color: 'rgb',
+      const out = await imageToCells(imageSrcUrl, {
+        width: W, height: H, mode: renderMode,
       });
       // Guard against a selection change mid-decode.
       if (loadedPath === reqPath) imageCells = out.cells;
@@ -423,6 +440,24 @@ export function createApp(initialCtx, win) {
   function stopPlayback() {
     if (loadedKind === 'video' && player) player.stop();
     else if (loadedKind === 'audio' && music) { music.stop(); audioPlaying.value = false; }
+  }
+  // Cycle the picture render strategy and invalidate whatever's showing so the
+  // next render re-samples in the new mode (audio has no picture → no-op there).
+  function cycleRenderMode() {
+    const i = RENDER_MODES.indexOf(renderMode);
+    renderMode = RENDER_MODES[(i + 1) % RENDER_MODES.length];
+    if (loadedKind === 'image') {
+      imageCells = null; imageReqW = -1; imageReqH = -1;   // force ensureImage()
+    } else if (loadedKind === 'video') {
+      // Respawn the player in the new mode. spawnPlayer reads `renderMode`; the
+      // render loop re-creates it when playerW no longer matches.
+      const wasPlaying = player && player.playing.peek();
+      const at = player ? player.currentTime.peek() : 0;
+      if (player) { try { player.destroy(); } catch (_) {} player = null; }
+      lastFrame = null; playerW = -1; playerH = -1;
+      pendingSeek = at; pendingPlay = wasPlaying;            // applied on respawn
+    }
+    setStatus('render: ' + renderMode, 1400);
   }
   function seekBy(delta) {
     const p = loadedKind === 'video' ? player : (loadedKind === 'audio' ? music : null);
@@ -568,7 +603,7 @@ export function createApp(initialCtx, win) {
           for (let x = 0; x < cols; x++) {
             const cell = rowCells[x];
             ctx.put(innerX + x, innerY + y, cell.ch, {
-              fg: cell.fg || C.fg, bg: C.bg,
+              fg: cell.fg || C.fg, bg: cell.bg || C.bg,
             });
           }
         }
@@ -589,7 +624,7 @@ export function createApp(initialCtx, win) {
           for (let x = 0; x < cols; x++) {
             const cell = rowCells[x];
             ctx.put(innerX + x, innerY + y, cell.ch, {
-              fg: cell.fg || C.fg, bg: C.bg,
+              fg: cell.fg || C.fg, bg: cell.bg || C.bg,
             });
           }
         }
@@ -716,12 +751,18 @@ export function createApp(initialCtx, win) {
     }
     const label = 'original: ';
     ctx.text(x, y, label, { fg: C.fgDim, bg: C.bg });
+    // Reserve room on the right for the render-mode tag (picture media only).
+    const tag = (loadedKind === 'image' || loadedKind === 'video')
+      ? '[' + renderMode + ' · R]' : '';
     const linkText = loadedPath || '';
     const lx = x + label.length;
-    const avail = Math.max(0, w - label.length);
+    const avail = Math.max(0, w - label.length - (tag ? tag.length + 1 : 0));
     ctx.text(lx, y, linkText.slice(0, avail), {
       fg: C.link, bg: C.bg, bold: focus === 'preview',
     });
+    if (tag) {
+      ctx.text(x + w - tag.length, y, tag, { fg: C.accent, bg: C.bg });
+    }
   }
 
   function renderStatusBar(ctx, y) {
@@ -791,6 +832,7 @@ export function createApp(initialCtx, win) {
       if (k === 'ArrowRight') { seekBy(+5); return; }
       if (k === 'ArrowUp') { focus = 'tree'; return; }
       if (e.code === 'KeyS') { stopPlayback(); return; }
+      if (e.code === 'KeyR') { cycleRenderMode(); return; }   // cycle picture mode
       if (e.code === 'KeyM') {                       // mute / unmute video
         videoMuted = !videoMuted;
         if (player && player.setMuted) player.setMuted(videoMuted);
