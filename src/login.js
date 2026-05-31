@@ -44,7 +44,13 @@ export function createLogin(engine, opts = {}) {
 
   // On-screen keyboard (touch) — without it there's no way to type the email /
   // username on a phone. Shown during the 'form' phase whenever the pref is on.
-  const keyboard = createKeyboard();
+  // Taller (2-row) keys on touch devices so they're comfortable to tap;
+  // desktop/tv keep slim 1-row keys.
+  const kbRowHeight = () => {
+    const m = engine.mode.peek();
+    return (m === 'desktop' || m === 'tv') ? 1 : 2;
+  };
+  const keyboard = createKeyboard({ rowHeight: kbRowHeight });
   function keyboardEnabled() { try { return !!userPrefs.get('keyboardEnabled'); } catch { return false; } }
   function keyboardVisible() { return !done && phase === 'form' && keyboardEnabled(); }
   function keyboardRows() { return keyboardVisible() ? keyboard.layout(engine.cols.peek()).height + 1 : 0; }
@@ -195,16 +201,21 @@ export function createLogin(engine, opts = {}) {
     if (top < 0) return;
     const c = engine.theme.peek().colors;
     engine.rect(0, top, cols, lay.height, { ch: ' ', bg: c.bg });
+    // Key faces fill the row height; with >1 row tall keys we leave the bottom
+    // row as background so adjacent rows read as separate keys.
+    const rh = lay.rowHeight || 1;
+    const faceH = rh > 1 ? rh - 1 : 1;
     for (const row of lay.rows) {
       const ry = top + row.y;
       for (const key of row.keys) {
         const on = key.active;
         const face = on ? c.accent : c.border;
         const fg = on ? c.bg : c.fg;
-        engine.rect(key.x, ry, key.w, 1, { ch: ' ', bg: face });
+        engine.rect(key.x, ry, key.w, faceH, { ch: ' ', bg: face });
         const label = String(key.label).slice(0, key.w);
         const lx = key.x + Math.max(0, Math.floor((key.w - label.length) / 2));
-        engine.text(lx, ry, label, { fg, bg: face, bold: on });
+        const ly = ry + Math.floor((faceH - 1) / 2);
+        engine.text(lx, ly, label, { fg, bg: face, bold: on });
       }
     }
   }

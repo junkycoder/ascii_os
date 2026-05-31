@@ -12,8 +12,9 @@
 //
 // Public API:
 //   const kb = createKeyboard()
-//   kb.layout(cols)        -> { cols, rowHeight, height, rows:[{ y, keys:[…] }] }
-//                             (also cached for hitTest)
+//   kb.layout(cols, rowHeight?) -> { cols, rowHeight, height, rows:[{ y, keys:[…] }] }
+//                             (rowHeight defaults to opts.rowHeight — a number or
+//                              fn; also cached for hitTest)
 //   kb.hitTest(x, y)       -> keyId | null      (local coords inside the panel)
 //   kb.press(keyId)        -> intent | null     (see INTENTS below)
 //   kb.state()             -> { layer, mods, pressedId }
@@ -103,8 +104,10 @@ export function createKeyboard(opts = {}) {
   // Lay the active layer's rows across `cols`, filling the full width. Keys are
   // `rowHeight` rows tall (default 1). Returns positioned key rects and caches
   // them for hitTest(). `y` is row-relative to the panel top.
-  function layout(cols) {
-    const rowHeight = Math.max(1, opts.rowHeight || 1);
+  function layout(cols, rowHeightOverride) {
+    const rh = rowHeightOverride != null ? rowHeightOverride
+             : (typeof opts.rowHeight === 'function' ? opts.rowHeight() : opts.rowHeight);
+    const rowHeight = Math.max(1, rh || 1);
     const gap = cols >= 30 ? 1 : 0; // 1-cell gaps when there's room
     const def = LAYERS[layer] || LAYERS.letters;
     const rows = [];
