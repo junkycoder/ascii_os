@@ -3,12 +3,15 @@
 // Serves the zero-build vanilla ES-module shell via the static ASSETS binding,
 // plus:
 //   • /api/auth/*            email + magic-link sign-in (Cloudflare KV + Resend)
+//   • /api/share/*           Durable-Object file share (local→DO→locals) + WS
+//                            live sync + WebRTC signaling relay (tunnel)
 //   • /auth                  universal-link landing → serves the SPA shell
 //   • /.well-known/apple-app-site-association   iOS associated-domains manifest
 //   • /api/newfish/*         same-origin proxy for the New Fish time-tracker API
 //
 // Bindings / config (see wrangler.jsonc):
 //   env.AUTH            KV namespace — keys user:<email> / magic:<tok> / session:<sid>
+//   env.SHARE           Durable Object namespace — class ShareRoom (one per code)
 //   env.MAIL_FROM       verified Resend sender, e.g. "FakanOS <login@fakan.cz>"
 //   env.APP_URL         public origin for the magic link, e.g. https://os.fakan.cz
 //   env.IOS_TEAM_ID     Apple Team ID for the AASA appID (set when known)
@@ -22,12 +25,21 @@ const MAGIC_TTL = 900;                  // magic link valid 15 min, single use
 const SESSION_TTL = 60 * 60 * 24 * 365; // remember the login ~1 year
 const REQUEST_THROTTLE = 60;            // min seconds between link requests / email (KV TTL floor)
 
+// ── File share (Durable Object) ─────────────────────────────────────
+// Small files (text + small images/audio) live inside the DO; anything bigger
+// is meant to go peer-to-peer over the WebRTC tunnel the DO only *signals* for.
+const SHARE_CODE_LEN = 8;               // unguessable room code length
+const SHARE_CODE_ALPHABET = '23456789abcdefghjkmnpqrstuvwxyz'; // no look-alikes
+const SHARE_MAX_FILE = 256 * 1024;      // 256 KiB per file kept in the DO
+const SHARE_MAX_TOTAL = 8 * 1024 * 1024; // 8 MiB total per room (soft cap)
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
     const path = url.pathname;
 
     if (path.startsWith('/api/auth/')) return handleAuth(request, env, url);
+    if (path.startsWith('/api/share/')) return handleShare(request, env, url);
     if (path === '/.well-known/apple-app-site-association') return aasa(env);
     if (path === '/auth') return serveApp(request, env);          // universal-link landing
     if (path.startsWith(NEWFISH_PREFIX)) return proxyNewfish(request, url);
@@ -182,6 +194,193 @@ async function sendMagicEmail(env, email, link) {
   if (!res.ok) {
     const detail = await res.text().catch(() => '');
     throw new Error('resend ' + res.status + ' ' + detail.slice(0, 200));
+  }
+}
+
+// ── /api/share/* — Durable-Object file share ────────────────────────
+// Routing model (the room code is the capability — "unlisted"):
+//   POST   /api/share/new                     → mint a fresh room code
+//   GET    /api/share/<code>/manifest         → list file metadata + room info
+//   GET    /api/share/<code>/file?path=<p>    → download one file
+//   PUT    /api/share/<code>/file?path=<p>    → upload one file (source local)
+//   DELETE /api/share/<code>/file?path=<p>    → remove one file
+//   GET    /api/share/<code>/ws  (Upgrade)    → live sync events + signaling
+// Everything past the code is forwarded to the per-code Durable Object, which
+// owns the storage + the open WebSockets.
+async function handleShare(request, env, url) {
+  if (!env.SHARE) return json({ error: 'share not configured' }, 500);
+
+  const rest = url.pathname.slice('/api/share/'.length);
+  if (rest === 'new' && request.method === 'POST') {
+    return json({ code: shareCode() });
+  }
+
+  const slash = rest.indexOf('/');
+  const code = (slash < 0 ? rest : rest.slice(0, slash)).toLowerCase();
+  const action = slash < 0 ? '' : rest.slice(slash + 1);
+  if (!isShareCode(code)) return json({ error: 'bad code' }, 400);
+  if (!action) return json({ error: 'no action' }, 404);
+
+  // Address the one Durable Object for this code; forward the rest verbatim so
+  // the DO can route on `action` and read ?path= / the WebSocket upgrade.
+  const id = env.SHARE.idFromName(code);
+  const stub = env.SHARE.get(id);
+  const doUrl = 'https://share/' + action + url.search;
+  return stub.fetch(new Request(doUrl, request));
+}
+
+function shareCode() {
+  const a = new Uint8Array(SHARE_CODE_LEN);
+  crypto.getRandomValues(a);
+  let s = '';
+  for (let i = 0; i < a.length; i++) s += SHARE_CODE_ALPHABET[a[i] % SHARE_CODE_ALPHABET.length];
+  return s;
+}
+function isShareCode(s) {
+  return typeof s === 'string' && s.length >= 4 && s.length <= 16 && /^[a-z0-9]+$/.test(s);
+}
+
+// The ShareRoom Durable Object — one instance per room code. Holds the shared
+// files (small enough to live in DO storage) and the set of connected peers,
+// broadcasting add/update/delete events and relaying WebRTC signaling so the
+// "locals" can open a peer-to-peer tunnel for files too big to keep here.
+export class ShareRoom {
+  constructor(state, env) {
+    this.state = state;
+    this.env = env;
+  }
+
+  async fetch(request) {
+    const url = new URL(request.url);
+    const action = url.pathname.split('/').filter(Boolean)[0] || '';
+    const path = url.searchParams.get('path') || '';
+
+    if (action === 'ws') return this.handleWs(request);
+    if (action === 'manifest') return this.manifest();
+    if (action === 'file') {
+      if (request.method === 'GET') return this.getFile(path);
+      if (request.method === 'PUT') return this.putFile(path, request);
+      if (request.method === 'DELETE') return this.delFile(path);
+    }
+    return json({ error: 'not found' }, 404);
+  }
+
+  // ── files ──────────────────────────────────────────────────────
+  async manifest() {
+    const map = await this.state.storage.list({ prefix: 'file:' });
+    const files = [];
+    let total = 0;
+    for (const v of map.values()) {
+      total += v.size || 0;
+      files.push({ path: v.path, name: v.name, mime: v.mime, size: v.size, mtime: v.mtime });
+    }
+    files.sort((a, b) => a.path.localeCompare(b.path));
+    const created = (await this.state.storage.get('created')) || null;
+    return json({ files, total, created, peers: this.peerIds().length });
+  }
+
+  async getFile(path) {
+    if (!path) return json({ error: 'no path' }, 400);
+    const f = await this.state.storage.get('file:' + path);
+    if (!f) return json({ error: 'not found' }, 404);
+    // data is a string (text) or an ArrayBuffer (binary) — both valid bodies.
+    return new Response(f.data, {
+      headers: { 'content-type': f.mime || 'application/octet-stream', 'cache-control': 'no-store' },
+    });
+  }
+
+  async putFile(path, request) {
+    if (!path || path.length > 1024) return json({ error: 'bad path' }, 400);
+    const buf = await request.arrayBuffer();
+    if (buf.byteLength > SHARE_MAX_FILE) {
+      return json({ error: 'file too large for share; use the tunnel', max: SHARE_MAX_FILE }, 413);
+    }
+    const mime = request.headers.get('content-type') || 'application/octet-stream';
+    const isText = mime.startsWith('text/') || mime.includes('json') || mime.includes('xml') || mime.includes('svg');
+
+    // Enforce a soft total cap so one room can't grow without bound.
+    const existing = await this.state.storage.get('file:' + path);
+    const map = await this.state.storage.list({ prefix: 'file:' });
+    let total = 0;
+    for (const v of map.values()) total += v.size || 0;
+    total -= (existing && existing.size) || 0;
+    if (total + buf.byteLength > SHARE_MAX_TOTAL) {
+      return json({ error: 'share is full', max: SHARE_MAX_TOTAL }, 413);
+    }
+
+    const mtime = Number(request.headers.get('x-mtime')) || Date.now();
+    const meta = { path, name: path.split('/').pop(), mime, size: buf.byteLength, mtime };
+    // Store text as a string (smaller + lets getFile serve it directly); binary
+    // as the raw ArrayBuffer (DO storage structured-clones both).
+    const data = isText ? new TextDecoder().decode(buf) : buf;
+    await this.state.storage.put('file:' + path, { ...meta, data });
+    if (!(await this.state.storage.get('created'))) {
+      await this.state.storage.put('created', Date.now());
+    }
+    this.broadcast({ type: existing ? 'updated' : 'added', file: meta });
+    return json({ ok: true, file: meta });
+  }
+
+  async delFile(path) {
+    if (!path) return json({ error: 'no path' }, 400);
+    const had = await this.state.storage.delete('file:' + path);
+    if (had) this.broadcast({ type: 'deleted', path });
+    return json({ ok: true });
+  }
+
+  // ── WebSocket: live sync + WebRTC signaling relay ──────────────
+  async handleWs(request) {
+    if (request.headers.get('upgrade') !== 'websocket') {
+      return new Response('expected websocket', { status: 426 });
+    }
+    const pair = new WebSocketPair();
+    const client = pair[0], server = pair[1];
+    // Hibernatable accept — the runtime can evict the DO between messages and
+    // still keep the socket; getWebSockets() rehydrates them on wake.
+    this.state.acceptWebSocket(server);
+    const peerId = randToken().slice(0, 12);
+    server.serializeAttachment({ peerId });
+    server.send(JSON.stringify({ type: 'hello', peerId, peers: this.peerIds().filter((p) => p !== peerId) }));
+    this.broadcastExcept(peerId, { type: 'peer-join', peerId });
+    return new Response(null, { status: 101, webSocket: client });
+  }
+
+  peerIds() {
+    return this.state.getWebSockets()
+      .map((ws) => { try { return (ws.deserializeAttachment() || {}).peerId; } catch { return null; } })
+      .filter(Boolean);
+  }
+
+  async webSocketMessage(ws, message) {
+    let m;
+    try { m = JSON.parse(message); } catch { return; }
+    const from = (() => { try { return (ws.deserializeAttachment() || {}).peerId; } catch { return null; } })();
+    // Relay WebRTC signaling (offer/answer/ice) to the targeted peer only.
+    if (m && m.type === 'signal' && m.to) {
+      const out = JSON.stringify({ type: 'signal', from, signal: m.signal });
+      for (const sock of this.state.getWebSockets()) {
+        let pid; try { pid = (sock.deserializeAttachment() || {}).peerId; } catch { pid = null; }
+        if (pid === m.to) { try { sock.send(out); } catch {} }
+      }
+    }
+  }
+
+  webSocketClose(ws) {
+    let pid; try { pid = (ws.deserializeAttachment() || {}).peerId; } catch { pid = null; }
+    if (pid) this.broadcastExcept(pid, { type: 'peer-leave', peerId: pid });
+  }
+  webSocketError(ws) { this.webSocketClose(ws); }
+
+  broadcast(obj) {
+    const s = JSON.stringify(obj);
+    for (const ws of this.state.getWebSockets()) { try { ws.send(s); } catch {} }
+  }
+  broadcastExcept(peerId, obj) {
+    const s = JSON.stringify(obj);
+    for (const ws of this.state.getWebSockets()) {
+      let pid; try { pid = (ws.deserializeAttachment() || {}).peerId; } catch { pid = null; }
+      if (pid !== peerId) { try { ws.send(s); } catch {} }
+    }
   }
 }
 

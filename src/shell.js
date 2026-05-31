@@ -1117,6 +1117,7 @@ export function createShell(engine, opts = {}) {
       x, y,
       items: [
         { label: 'Open',           onSelect: () => openFile(path), hotkey: 'O' },
+        { label: 'Share…',         onSelect: () => { globalThis.__aciiSharePath = path; openOrFocus('share'); }, hotkey: 'S' },
         { label: isWp ? 'Remove wallpaper' : 'Set as wallpaper',
           onSelect: () => isWp ? clearWallpaper() : setWallpaper(path), hotkey: 'W' },
         { type: 'separator' },
