@@ -18,6 +18,8 @@ import { createWindowManager } from './wm.js';
 import { createFS } from './fs.js';
 import { createContextMenu } from './ui-menu.js';
 import { createMusicPlayer } from './music.js';
+import { createKeyboard } from './keyboard.js';
+import userPrefs from './user.js';
 import * as nf from './newfish.js';
 
 // Set inside createShell so the module-level 'timetrack' widget can open the
@@ -312,6 +314,12 @@ export function createShell(engine, opts = {}) {
 
   const wm = createWindowManager(engine);
 
+  // ── On-screen keyboard (touch) ──────────────────────────────────
+  const keyboard = createKeyboard();
+  const keyboardEnabled = signal(!!userPrefs.get('keyboardEnabled'));
+  userPrefs.subscribe(() => { keyboardEnabled.value = !!userPrefs.get('keyboardEnabled'); });
+  let kbHidden = false; // transient per-focus dismissal (swipe down on the keyboard)
+
   // Map: appId -> { app spec, instance(s)?, win }
   const running = new Map(); // winId -> { spec, instance, win }
   const iconPositions = new Map(); // appId -> { x, y }
@@ -439,11 +447,11 @@ export function createShell(engine, opts = {}) {
     if (mode === 'watch') {
       x = 0; y = 0; w = cols; h = rows; maximized = true;
     } else if (mode === 'mobile') {
-      x = 0; y = 0; w = cols; h = rows - tbH; maximized = true;
+      x = 0; y = 0; w = cols; h = rows - tbH - keyboardReserve(); maximized = true;
     } else {
       // Floating defaults: try to use saved geom or default
       const defaultW = Math.min(50, cols - 8);
-      const defaultH = Math.min(20, rows - 6);
+      const defaultH = Math.min(20, rows - 6 - keyboardReserve());
       x = geom?.x ?? (4 + ((_winSeq * 3) % Math.max(1, cols - defaultW - 4)));
       y = geom?.y ?? (2 + ((_winSeq * 2) % Math.max(1, rows - defaultH - 4)));
       w = geom?.w ?? defaultW;
@@ -975,6 +983,63 @@ export function createShell(engine, opts = {}) {
     return null;
   }
 
+  // ── On-screen keyboard helpers ──────────────────────────────────
+  // Visible only while an app window is focused (so the desktop stays clear);
+  // a swipe-down dismisses it until focus changes (the effect below clears it).
+  function keyboardVisible() {
+    return keyboardEnabled.peek() && !kbHidden && !!wm.focused.peek();
+  }
+  // Rows the keyboard reserves at the bottom whenever it's enabled, so windows
+  // never sit under it (computed regardless of current focus for stable sizing).
+  function keyboardReserve() {
+    return keyboardEnabled.peek() ? keyboard.layout(engine.cols.peek()).height : 0;
+  }
+  // A focus change clears a temporary swipe-down dismissal.
+  effect(() => { wm.focused.value; kbHidden = false; });
+
+  function sendKeyToFocused(ev) {
+    const f = wm.focused.peek();
+    if (!f) return;
+    const rec = running.get(f.id);
+    if (rec?.instance?.onKey) { try { rec.instance.onKey(ev); } catch {} }
+  }
+  // Handle a tap/click at (x,y) if it lands in the keyboard band. Returns true
+  // when the event was inside the band (and thus consumed by the keyboard).
+  function handleKeyboardPress(x, y) {
+    if (!keyboardVisible()) return false;
+    const lay = keyboard.layout(engine.cols.peek());
+    const top = engine.rows.peek() - 1 - lay.height;
+    if (top < 0 || y < top || y >= top + lay.height) return false;
+    const id = keyboard.hitTest(x, y - top);
+    if (id) {
+      const intent = keyboard.press(id);
+      if (intent?.kind === 'hide') kbHidden = true;
+      else if (intent?.kind === 'key') for (const ev of intent.events) sendKeyToFocused(ev);
+    }
+    return true; // swallow taps in the band even on a gap between keys
+  }
+  function renderKeyboard() {
+    if (!keyboardVisible()) return;
+    const cols = engine.cols.peek();
+    const lay = keyboard.layout(cols);
+    const top = engine.rows.peek() - 1 - lay.height;
+    if (top < 0) return;
+    const c = engine.theme.peek().colors;
+    engine.rect(0, top, cols, lay.height, { ch: ' ', bg: c.bg });
+    for (const row of lay.rows) {
+      const ry = top + row.y;
+      for (const k of row.keys) {
+        const on = k.active;
+        const face = on ? c.accent : c.border;
+        const fg = on ? c.bg : c.fg;
+        engine.rect(k.x, ry, k.w, 1, { ch: ' ', bg: face });
+        const label = String(k.label).slice(0, k.w);
+        const lx = k.x + Math.max(0, Math.floor((k.w - label.length) / 2));
+        engine.text(lx, ry, label, { fg, bg: face, bold: on });
+      }
+    }
+  }
+
   // ── Input routing ───────────────────────────────────────────────
   // WM already handles drag/resize/focus via mousedown on its decoration.
   // We handle: icon clicks, taskbar chips, and forward body events to focused app.
@@ -1188,7 +1253,8 @@ export function createShell(engine, opts = {}) {
     const cols = engine.cols.peek();
     const rows = engine.rows.peek();
     const tbY = taskbarY();
-    const maxY = tbY >= 0 && taskbarPos.peek() === 'bottom' ? tbY - 1 : rows - 1;
+    const reserve = keyboardReserve();
+    const maxY = (tbY >= 0 && taskbarPos.peek() === 'bottom' ? tbY - 1 : rows - 1) - reserve;
     return {
       x: Math.max(0, Math.min(cols - w, x)),
       y: Math.max(0, Math.min(maxY - h + 1, y)),
@@ -1214,6 +1280,9 @@ export function createShell(engine, opts = {}) {
         return;
       }
     }
+
+    // ── On-screen keyboard intercepts taps in its band ─────────
+    if ((e.type === 'mousedown' || e.type === 'click') && handleKeyboardPress(e.x, e.y)) return;
 
     // ── Drag in progress: track move/up first ─────────────────
     if (deskDrag) {
@@ -1368,6 +1437,14 @@ export function createShell(engine, opts = {}) {
         return;
       }
     }
+    // ── On-screen keyboard intercepts taps / swipe-down in its band ──
+    if (e.type === 'tap' && handleKeyboardPress(e.x, e.y)) return;
+    if (e.type === 'swipe' && e.dir === 'down' && keyboardVisible()) {
+      const lay = keyboard.layout(engine.cols.peek());
+      const top = engine.rows.peek() - 1 - lay.height;
+      if (e.y >= top) { kbHidden = true; return; }
+    }
+
     // Tap on widget close × removes it (touch shortcut).
     if (e.type === 'tap' && !pointInAnyWindow(e.x, e.y)) {
       const closing = widgetCloseHit(e.x, e.y);
@@ -1546,6 +1623,14 @@ export function createShell(engine, opts = {}) {
       bumpSave();
       return;
     }
+    // Alt+K toggle the on-screen keyboard (persisted to the user pref)
+    if (e.alt && keyIs(e, 'k')) {
+      const next = !keyboardEnabled.peek();
+      keyboardEnabled.value = next;
+      try { userPrefs.set('keyboardEnabled', next); } catch {}
+      kbHidden = false;
+      return;
+    }
     const f = wm.focused.peek();
 
     // App launch by number key (1..9) — ONLY when no window is focused, so
@@ -1596,6 +1681,7 @@ export function createShell(engine, opts = {}) {
     renderMarquee();        // rubber-band selection box over the desktop
     wm.render();
     renderTaskbar();
+    renderKeyboard();       // touch keyboard band (above the taskbar)
     renderActiveMenu();     // context menu always on top
   }
 
@@ -1627,5 +1713,6 @@ export function createShell(engine, opts = {}) {
     activeMenu,
     taskbarPos, backgroundKind,
     running,
+    keyboard, keyboardEnabled,
   };
 }
