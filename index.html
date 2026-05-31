@@ -204,35 +204,52 @@
       // `globalThis.__aciiFS ||= createFS(...)` lines adopt this instance.
       globalThis.__aciiFS = createFS({ storageKey: auth.fsKey(user) });
 
-      const [
-        { createShell },
-        { createApp: createTerminal },
-        { createApp: createSnake },
-        { createApp: createNotes },
-        { createApp: createPaint },
-        { createApp: createReadme },
-        { createApp: createFindman },
-        { createApp: createMediaMogul },
-        { createApp: createGameMaker },
-        { createApp: createTimetrack },
-        { createApp: createGitDesk },
-        { createApp: createShare },
-        { createApp: createFeedback },
-      ] = await Promise.all([
-        import('./src/shell.js' + V),
-        import('./src/apps/terminal.js' + V),
-        import('./src/apps/snake.js' + V),
-        import('./src/apps/notes.js' + V),
-        import('./src/apps/paint.js' + V),
-        import('./src/apps/readme.js' + V),
-        import('./src/apps/findman.js' + V),
-        import('./src/apps/mediamogul.js' + V),
-        import('./src/apps/gamemaker.js' + V),
-        import('./src/apps/timetrack.js' + V),
-        import('./src/apps/gitdesk.js' + V),
-        import('./src/apps/share.js' + V),
-        import('./src/apps/feedback.js' + V),
-      ]);
+      // Import the shell + every app independently. One stale `?v=` 404 or a
+      // single failing app module must NOT abort the whole boot, so we use
+      // `Promise.allSettled` and map results back by name. A rejected app simply
+      // stays `undefined`; it gets skipped in the registry below (and the shell
+      // already guards against an undefined factory at open time).
+      const _mods = [
+        ['shell',      './src/shell.js'],
+        ['terminal',   './src/apps/terminal.js'],
+        ['snake',      './src/apps/snake.js'],
+        ['notes',      './src/apps/notes.js'],
+        ['paint',      './src/apps/paint.js'],
+        ['readme',     './src/apps/readme.js'],
+        ['findman',    './src/apps/findman.js'],
+        ['mediamogul', './src/apps/mediamogul.js'],
+        ['gamemaker',  './src/apps/gamemaker.js'],
+        ['timetrack',  './src/apps/timetrack.js'],
+        ['gitdesk',    './src/apps/gitdesk.js'],
+        ['share',      './src/apps/share.js'],
+        ['feedback',   './src/apps/feedback.js'],
+      ];
+      const _settled = await Promise.allSettled(_mods.map(([, path]) => import(path + V)));
+      const _byName = {};
+      _settled.forEach((res, i) => {
+        const name = _mods[i][0];
+        if (res.status === 'fulfilled') _byName[name] = res.value;
+        else console.error('[boot] module failed to load: ' + _mods[i][1], res.reason);
+      });
+
+      // The shell itself is mandatory — without it there is no desktop to boot.
+      if (!_byName.shell || typeof _byName.shell.createShell !== 'function') {
+        throw new Error('shell.js failed to load — cannot boot desktop');
+      }
+      const { createShell } = _byName.shell;
+      // App factories: `undefined` for any app whose module rejected.
+      const createTerminal   = _byName.terminal?.createApp;
+      const createSnake      = _byName.snake?.createApp;
+      const createNotes      = _byName.notes?.createApp;
+      const createPaint      = _byName.paint?.createApp;
+      const createReadme     = _byName.readme?.createApp;
+      const createFindman    = _byName.findman?.createApp;
+      const createMediaMogul = _byName.mediamogul?.createApp;
+      const createGameMaker  = _byName.gamemaker?.createApp;
+      const createTimetrack  = _byName.timetrack?.createApp;
+      const createGitDesk    = _byName.gitdesk?.createApp;
+      const createShare      = _byName.share?.createApp;
+      const createFeedback   = _byName.feedback?.createApp;
 
       // Collaborative desktop: connect this user to their room's presence (who's
       // here + live cursors) AND sync the shared desktop FS. The room is the
@@ -272,7 +289,9 @@
         { id: 'share',     label: 'Share',     icon: '[⇄]', factory: createShare },
         { id: 'feedback',  label: 'Feedback',  icon: '[✉]', factory: createFeedback },
         { id: 'snake',     label: 'Snake',     icon: '[●]', factory: createSnake },
-      ];
+      // Drop any app whose module failed to import — it stays out of the
+      // registry (no icon / taskbar entry) rather than registering a broken one.
+      ].filter(a => typeof a.factory === 'function');
 
       const shell = createShell(engine, {
         apps: appRegistry,

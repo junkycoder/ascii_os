@@ -92,6 +92,15 @@ const CHANGELOG_MD = `# Changelog
 
 export function createFS(opts = {}) {
   const storageKey = opts.storageKey || 'acii.fs.v1';
+  // Optional persistence-error hook. Called with the thrown error when a
+  // localStorage write fails (e.g. QuotaExceededError, private mode). Settable
+  // either at construction (`createFS({ onPersistError })`) or later
+  // (`fs.onPersistError = fn`). Default just warns instead of silently losing
+  // data. Backward compatible: omit it and writes still fail soft.
+  const api = {};
+  api.onPersistError = typeof opts.onPersistError === 'function'
+    ? opts.onPersistError
+    : (err) => { console.warn('[fs] persist failed', err); };
   const changes = signal(0);
   const subs = new Map(); // path -> Set<fn>
   const mounts = new Map(); // mountPath -> { handle, mode }
@@ -157,7 +166,10 @@ export function createFS(opts = {}) {
           };
         }
         localStorage.setItem(storageKey, JSON.stringify(obj));
-      } catch (_) { /* quota / private mode */ }
+      } catch (err) {
+        // quota exceeded / private mode — surface instead of silently dropping.
+        try { api.onPersistError(err); } catch (_) { /* hook must not break saving */ }
+      }
     }, 200);
   }
 
@@ -790,7 +802,7 @@ export function createFS(opts = {}) {
   // initialize
   load();
 
-  return {
+  Object.assign(api, {
     exists,
     stat,
     list,
@@ -823,5 +835,6 @@ export function createFS(opts = {}) {
         .then((changed) => { if (changed) notify(dirPath); return changed; })
         .catch(() => false);
     },
-  };
+  });
+  return api;
 }

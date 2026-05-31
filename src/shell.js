@@ -493,6 +493,12 @@ export function createShell(engine, opts = {}) {
   function openApp(appId, geom) {
     const spec = apps.find(a => a.id === appId);
     if (!spec) return null;
+    // Defensive: a registry entry whose module failed to import (factory is not
+    // a function) must not open a broken window — tell the user instead.
+    if (typeof spec.factory !== 'function') {
+      showToast('"' + (spec.label || appId) + '" is unavailable (failed to load)');
+      return null;
+    }
     const mode = engine.mode.peek();
     // On watch/mobile: only one window at a time — close others.
     if (mode === 'watch' || mode === 'mobile') {
@@ -1871,6 +1877,17 @@ export function createShell(engine, opts = {}) {
   let collabToast = '';
   let collabToastUntil = 0;
   function showToast(msg) { collabToast = msg; collabToastUntil = Date.now() + 2600; }
+
+  // Surface storage-quota failures as a non-blocking toast instead of silently
+  // dropping the user's data. Still warns to the console (the fs default).
+  let _lastPersistWarn = 0;
+  fs.onPersistError = (err) => {
+    console.warn('[fs] persist failed', err);
+    const now = Date.now();
+    if (now - _lastPersistWarn < 4000) return; // avoid toast spam on repeated saves
+    _lastPersistWarn = now;
+    showToast('Storage full — recent changes may not be saved');
+  };
 
   function renderPresence() {
     if (!collab) return;
