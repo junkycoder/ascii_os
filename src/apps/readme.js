@@ -9,7 +9,7 @@
 
 import { createMarkdownView } from "../markdown.js";
 
-const DEFAULT_README = `# acii_os
+const DEFAULT_README = `# FakanOS
 
 A tiny **ASCII operating environment** for the web — a reactive grid renderer,
 a window manager, and a handful of apps. Runs *anywhere* the web runs:
@@ -19,7 +19,7 @@ desktop, mobile, TV, even a smartwatch if you squint.
 
 ## Why
 
-Most UI frameworks pretend pixels are infinite. *acii_os* picks the opposite
+Most UI frameworks pretend pixels are infinite. *FakanOS* picks the opposite
 constraint: every screen is a grid of characters. The result is fast,
 themeable, accessible, and refreshingly small.
 
@@ -43,6 +43,17 @@ engine.start()
 - **Tab / Shift+Tab** — cycle through links
 - **Enter** — open the focused link
 - **Mouse wheel** — scroll; **click** — follow a link
+
+## Shortcuts
+
+- **1–9** — launch an app (when no window is focused)
+- **Cmd/Ctrl + number** — always launch an app
+- **Alt+Tab** — swap / cycle windows
+- **Ctrl+W** — close the focused window
+- **Esc** — un-maximize the focused window
+- **Ctrl+T** — cycle the color theme
+- **Alt+W** — spawn a desktop widget (clock → stats → note)
+- **Alt+H** — move the taskbar (bottom → top → hidden)
 
 ## What ships
 

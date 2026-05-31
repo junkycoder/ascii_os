@@ -1,4 +1,4 @@
-// terminal.js — toy terminal emulator app for acii_os
+// terminal.js — toy terminal emulator app for FakanOS
 // Fake shell with built-in commands, scrollback, history, caret.
 // API contract: see project CLAUDE.md — exports createApp(initialCtx, win).
 
@@ -10,7 +10,7 @@ const PROMPT = 'acii> ';
 // ── fake filesystem for `ls` / `cat` ────────────────────────────────
 const FAKE_FILES = {
   'about.md': [
-    '# acii_os',
+    '# FakanOS',
     '',
     'A tiny ASCII engine and shell that runs anywhere the web runs.',
     'Zero dependencies. Pure DOM. ESM only.',
@@ -23,7 +23,7 @@ const FAKE_FILES = {
     'PgUp / PgDn to scroll the scrollback.',
   ].join('\n'),
   'motd.txt': [
-    'Welcome to acii_os.',
+    'Welcome to FakanOS.',
     'All bits are imaginary; all glyphs are real.',
   ].join('\n'),
 };
@@ -111,7 +111,7 @@ export function createApp(initialCtx, win) {
   }
 
   // ── motd ────────────────────────────────────────────────────────
-  pushLine('acii_os 0.1 (web) — type `help` for commands.', 'accent');
+  pushLine('FakanOS 0.1 (web) — type `help` for commands.', 'accent');
   pushLine('', 'fg');
 
   // ── command table ───────────────────────────────────────────────
@@ -149,7 +149,7 @@ export function createApp(initialCtx, win) {
     },
     clear() { scrollback.length = 0; scrollOffset = 0; },
     cls() { this.clear(); },
-    uname() { pushLine('acii_os 0.1 (web)'); },
+    uname() { pushLine('FakanOS 0.1 (web)'); },
     date() { pushLine(nowStr()); },
     whoami() { pushLine('guest@acii'); },
     fortune() {

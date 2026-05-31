@@ -1,4 +1,4 @@
-// wm.js — Window Manager for the acii_os engine.
+// wm.js — Window Manager for the FakanOS engine.
 //
 // Manages a stack of overlapping windows with drag, resize, focus chain,
 // maximize, close, and full mouse + touch + keyboard interaction.

@@ -1,4 +1,4 @@
-// Virtual filesystem for acii_os.
+// Virtual filesystem for FakanOS.
 // In-memory tree persisted to localStorage, with optional File System Access mounts.
 //
 // Paths: UNIX-style, leading slash, no trailing slash (except root '/').
@@ -68,7 +68,7 @@ function toUint8(data) {
   return null;
 }
 
-const README_MD = `# acii_os
+const README_MD = `# FakanOS
 
 A tiny ASCII engine and shell that runs in the browser.
 

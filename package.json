@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "description": "acii_os packaged as a native iOS app (cz.fakan.os) via Capacitor. The web stays zero-dependency, no-build vanilla ES modules; Capacitor is only a native wrapper.",
+  "description": "FakanOS packaged as a native iOS app (cz.fakan.os) via Capacitor. The web stays zero-dependency, no-build vanilla ES modules; Capacitor is only a native wrapper.",
   "scripts": {
     "dev": "python3 .claude/devserver.py 8765 0.0.0.0",
     "build": "node tools/build-www.mjs",

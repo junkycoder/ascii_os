@@ -1,4 +1,4 @@
-// acii_os auth — email + magic-link sign-in, session, per-user storage keys.
+// FakanOS auth — email + magic-link sign-in, session, per-user storage keys.
 //
 // Replaces the old local account store (users.js). Identity is the user's
 // EMAIL; the edge worker (worker/index.js, backed by Cloudflare KV) issues a

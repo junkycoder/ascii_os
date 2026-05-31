@@ -1,4 +1,4 @@
-# CLAUDE.md — acii_os project guide
+# CLAUDE.md — FakanOS project guide
 
 ASCII-first UI framework + desktop shell for the browser. **Read `HANDOFF.md`
 for current state and the work backlog before starting.** This file and

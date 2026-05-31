@@ -1,4 +1,4 @@
-// acii_os shell — desktop / launcher built on top of engine + wm + apps.
+// FakanOS shell — desktop / launcher built on top of engine + wm + apps.
 //
 // Wires:
 //   - background (themed pattern)

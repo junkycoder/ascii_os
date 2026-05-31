@@ -1,4 +1,4 @@
-// System user + settings/preferences store for acii_os.
+// System user + settings/preferences store for FakanOS.
 //
 // Concept: everything lives on the virtual "disk". A single system user owns
 // settings/preferences that persist across reloads via localStorage.

@@ -1,5 +1,5 @@
 {
-  // acii_os on Cloudflare Workers. Static ASCII shell served from the repo root
+  // FakanOS on Cloudflare Workers. Static ASCII shell served from the repo root
   // via the ASSETS binding; the worker entry (worker/index.js) is where the
   // D1 database + /api/* routes will land later. Account: junkycoder.
   "$schema": "node_modules/wrangler/config-schema.json",
@@ -30,11 +30,10 @@
   ],
   "vars": {
     "APP_URL": "https://os.fakan.cz",
-    "MAIL_FROM": "acii_os <login@fakan.cz>",
+    "MAIL_FROM": "FakanOS <login@fakan.cz>",
     // Apple Team ID for the AASA appID (os.fakan.cz/auth → cz.fakan.os).
-    // Find it at developer.apple.com/account → Membership. Empty = AASA still
-    // served, but iOS universal links won't validate until this is set.
-    "IOS_TEAM_ID": ""
+    // Team "Daniel Hromada" (Individual) — NOT the old "Covrex" client team.
+    "IOS_TEAM_ID": "C8W48M2X85"
   }
 
   // ── DB (later) ──────────────────────────────────────────────────────────

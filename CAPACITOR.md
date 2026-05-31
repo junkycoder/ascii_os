@@ -1,6 +1,6 @@
 # CAPACITOR.md — iOS app `cz.fakan.os`
 
-Zadání + návod, jak z `acii_os` (zero-dep, no-build web) udělat nativní iOS
+Zadání + návod, jak z `FakanOS` (zero-dep, no-build web) udělat nativní iOS
 appku přes [Capacitor](https://capacitorjs.com/). Web zůstává čistě vanilla ES
 moduly; Capacitor je jen nativní obal navíc.
 

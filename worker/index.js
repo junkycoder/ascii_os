@@ -1,4 +1,4 @@
-// acii_os — edge worker.
+// FakanOS — edge worker.
 //
 // Serves the zero-build vanilla ES-module shell via the static ASSETS binding,
 // plus:
@@ -9,7 +9,7 @@
 //
 // Bindings / config (see wrangler.jsonc):
 //   env.AUTH            KV namespace — keys user:<email> / magic:<tok> / session:<sid>
-//   env.MAIL_FROM       verified Resend sender, e.g. "acii_os <login@fakan.cz>"
+//   env.MAIL_FROM       verified Resend sender, e.g. "FakanOS <login@fakan.cz>"
 //   env.APP_URL         public origin for the magic link, e.g. https://os.fakan.cz
 //   env.IOS_TEAM_ID     Apple Team ID for the AASA appID (set when known)
 //   env.RESEND_API_KEY  secret — `wrangler secret put RESEND_API_KEY`
@@ -159,15 +159,15 @@ async function authMe(request, env) {
 // sender domain (fakan.cz) + RESEND_API_KEY secret.
 async function sendMagicEmail(env, email, link) {
   if (!env.RESEND_API_KEY) throw new Error('mail not configured');
-  const from = env.MAIL_FROM || 'acii_os <login@fakan.cz>';
-  const subject = 'Your acii_os sign-in link';
+  const from = env.MAIL_FROM || 'FakanOS <login@fakan.cz>';
+  const subject = 'Your FakanOS sign-in link';
   const text =
-    'Sign in to acii_os\n\n' +
+    'Sign in to FakanOS\n\n' +
     'Open this link to finish signing in (valid 15 minutes):\n' + link + '\n\n' +
     'If you did not request this, you can ignore this email.';
   const html =
     '<div style="font-family:ui-monospace,Menlo,monospace;background:#0d0d0d;color:#ddd;padding:32px">' +
-    '<div style="color:#00ff88;font-size:20px;font-weight:bold;letter-spacing:2px">a c i i _ o s</div>' +
+    '<div style="color:#00ff88;font-size:20px;font-weight:bold;letter-spacing:2px">F a k a n O S</div>' +
     '<p style="color:#bbb">Open the link below to finish signing in. It is valid for 15 minutes and can be used once.</p>' +
     '<p><a href="' + link + '" style="display:inline-block;background:#00ff88;color:#0d0d0d;padding:12px 20px;border-radius:6px;text-decoration:none;font-weight:bold">Sign in →</a></p>' +
     '<p style="color:#777;font-size:12px;word-break:break-all">' + link + '</p>' +
