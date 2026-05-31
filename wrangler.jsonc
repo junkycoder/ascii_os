@@ -35,11 +35,13 @@
   // works on every plan; new_sqlite_classes is required for a brand-new class.
   "durable_objects": {
     "bindings": [
-      { "name": "SHARE", "class_name": "ShareRoom" }
+      { "name": "SHARE", "class_name": "ShareRoom" },
+      { "name": "COLLAB", "class_name": "CollabRoom" }
     ]
   },
   "migrations": [
-    { "tag": "v1", "new_sqlite_classes": ["ShareRoom"] }
+    { "tag": "v1", "new_sqlite_classes": ["ShareRoom"] },
+    { "tag": "v2", "new_sqlite_classes": ["CollabRoom"] }
   ],
 
   "vars": {

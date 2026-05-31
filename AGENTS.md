@@ -83,6 +83,15 @@ signals → engine → { fs, user, drafts, themes } → { wm, ui, ui-menu, markd
   **tunnel** (big files). **Backend** = `ShareRoom` DO in `worker/index.js`
   (binding `SHARE`, SQLite migration in `wrangler.jsonc`); needs a live worker
   (not the python devserver). Handoffs: `__aciiSharePath`, `__aciiShareJoin`.
+- **`collab.js`** — collaborative desktop. A room is one owner's desktop, keyed
+  by the **owner's user id**; people join by **email invite** (owner → user-chip
+  "Invite to desktop…" → magic link carrying the room). Boot `peek`s the token to
+  show a **nickname step only for a brand-new email** (registration only if new);
+  existing accounts go straight in. `verify` records DO membership + persists
+  `room` on the session. The `CollabRoom` DO (binding `COLLAB`) serves **live
+  presence** (who's here + cursors) over a WebSocket; the shell renders it from
+  `opts.collab`. **Only phase 1+2 (presence + invite/identity) exists — shared
+  content / window replication and co-editing are NOT built yet.**
 
 ### The app contract
 

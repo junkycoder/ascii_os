@@ -356,6 +356,11 @@ export function createShell(engine, opts = {}) {
   const STORAGE_KEY = opts.storageKey || DEFAULT_SHELL_KEY;
   const user = opts.user || null;
   const onLogout = typeof opts.onLogout === 'function' ? opts.onLogout : null;
+  // Collaborative desktop: a live presence socket (createCollabClient().connect)
+  // exposing roster()/sendCursor(), plus the owner-only invite hook.
+  const collab = opts.collab || null;
+  const canInvite = !!opts.canInvite;
+  const onInvite = typeof opts.onInvite === 'function' ? opts.onInvite : null;
   const taskbarPos = signal(opts.taskbarPosition || 'bottom'); // bottom|top|hidden
   const backgroundKind = signal(opts.background || 'dots');
   // Currently selected desktop file (for Quick-Look: spacebar previews it).
@@ -1320,6 +1325,7 @@ export function createShell(engine, opts = {}) {
       items: [
         { label: `${user.glyph || '☺'} ${user.name || 'user'}`, disabled: true },
         { type: 'separator' },
+        ...(canInvite ? [{ label: 'Invite to desktop…', onSelect: () => promptInvite(), hotkey: 'I' }] : []),
         { label: 'Switch user…', onSelect: () => onLogout && onLogout(), hotkey: 'U' },
         { label: 'Log out',      onSelect: () => onLogout && onLogout(), danger: true, hotkey: 'L' },
       ],
@@ -1380,6 +1386,10 @@ export function createShell(engine, opts = {}) {
   }
 
   engine.onMouse((e) => {
+    // Broadcast our cursor to the room (throttled inside the collab client).
+    if (collab && (e.type === 'mousemove' || e.type === 'mousedown' || e.type === 'click')) {
+      try { collab.sendCursor(e.x, e.y); } catch {}
+    }
     // ── Active context menu intercepts mouse events ────────────
     const am = activeMenu.peek();
     if (am) {
@@ -1801,8 +1811,74 @@ export function createShell(engine, opts = {}) {
     renderMarquee();        // rubber-band selection box over the desktop
     wm.render();
     renderTaskbar();
+    renderPresence();       // collaborators' cursors + who's-here strip
     renderKeyboard();       // touch keyboard band (above the taskbar)
     renderActiveMenu();     // context menu always on top
+  }
+
+  // ── Collaborative presence overlay ──────────────────────────────
+  const PRESENCE_COLORS = ['accent', 'link', 'warning', 'success', 'error'];
+  function presenceColor(c, userId) {
+    let h = 0; const s = String(userId || '');
+    for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0;
+    return c[PRESENCE_COLORS[h % PRESENCE_COLORS.length]] || c.accent;
+  }
+  let collabToast = '';
+  let collabToastUntil = 0;
+  function showToast(msg) { collabToast = msg; collabToastUntil = Date.now() + 2600; }
+
+  function renderPresence() {
+    if (!collab) return;
+    const c = engine.theme.peek().colors;
+    const cols = engine.cols.peek();
+    let roster = [];
+    try { roster = collab.roster() || []; } catch {}
+    const meId = (collab.me && collab.me.userId) || null;
+    const others = roster.filter((p) => p.userId && p.userId !== meId);
+
+    // Remote cursors: a colored caret + the collaborator's nick.
+    for (const p of others) {
+      if (p.x == null || p.y == null) continue;
+      const x = Math.max(0, Math.min(cols - 1, p.x | 0));
+      const y = Math.max(0, Math.min(engine.rows.peek() - 1, p.y | 0));
+      const col = presenceColor(c, p.userId);
+      engine.put(x, y, '▮', { fg: col, bold: true });
+      const tag = ' ' + (p.nick || 'guest');
+      const tx = x + 1 + tag.length <= cols ? x + 1 : x - tag.length;
+      engine.text(Math.max(0, tx), y, tag.slice(0, Math.max(0, cols - Math.max(0, tx))), { fg: c.bg, bg: col });
+    }
+
+    // "Who's here" strip, top-left, on top of everything.
+    if (roster.length > 1 || (roster.length === 1 && meId)) {
+      let x = 1;
+      engine.text(x, 0, '◉', { fg: c.success }); x += 2;
+      for (const p of roster) {
+        const isMe = p.userId === meId;
+        const col = isMe ? c.fg : presenceColor(c, p.userId);
+        const label = (p.role === 'owner' ? '♚' : '•') + (p.nick || 'guest') + (isMe ? ' (you)' : '');
+        if (x + label.length + 1 > cols) break;
+        engine.text(x, 0, label, { fg: col, bold: isMe });
+        x += label.length + 2;
+      }
+    }
+
+    // Transient toast (invite sent / failed), centered up top.
+    if (collabToast && Date.now() < collabToastUntil) {
+      const msg = collabToast.slice(0, cols - 2);
+      engine.text(Math.max(1, Math.floor((cols - msg.length) / 2)), 1, msg, { fg: c.bg, bg: c.accent, bold: true });
+    }
+  }
+
+  // Owner-only: invite an email into this desktop. Reuses window.prompt (already
+  // used for rename) — minimal UI for the foundation; a panel can come later.
+  function promptInvite() {
+    if (!onInvite) return;
+    const email = window.prompt('Invite to this desktop — email:');
+    if (!email || !email.trim()) return;
+    const nick = (window.prompt('Suggested nickname (optional):') || '').trim();
+    Promise.resolve(onInvite(email.trim(), nick))
+      .then(() => showToast('Invite sent to ' + email.trim()))
+      .catch((e) => showToast('Invite failed: ' + ((e && e.message) || e)));
   }
 
   function renderActiveMenu() {

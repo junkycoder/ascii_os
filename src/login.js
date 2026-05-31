@@ -37,10 +37,15 @@ export function createLogin(engine, opts = {}) {
   let email = '';
   let username = '';
   let focus = FIELD_EMAIL;
-  let phase = 'form';          // 'form' | 'sending' | 'sent' | 'verifying'
+  let phase = 'form';          // 'form' | 'sending' | 'sent' | 'verifying' | 'nick'
   let error = '';
   let done = false;
   let layout = null;
+
+  // Invite flow: a magic link that joins someone's room. A brand-new invitee
+  // picks a nickname here before we verify (existing accounts skip straight in).
+  let pendingInviteToken = null;
+  let inviteInfo = null;
 
   // On-screen keyboard (touch) — without it there's no way to type the email /
   // username on a phone. Shown during the 'form' phase whenever the pref is on.
@@ -116,6 +121,7 @@ export function createLogin(engine, opts = {}) {
 
     if (phase === 'sent') return renderSent(L, c);
     if (phase === 'verifying') return renderBusy(L, c, 'signing you in…');
+    if (phase === 'nick') return renderNick(L, c);
 
     centerText(L, L.blurbY, 'sign in with your email — we\'ll send a magic link', c.fgDim);
 
@@ -163,6 +169,24 @@ export function createLogin(engine, opts = {}) {
     layout.btn = { x: bx, y: L.btnY, w: label.length };
     drawGuest(L, c);
     if (error) centerText(L, L.hintY, '✗ ' + error, c.error);
+  }
+
+  // Brand-new invitee: pick a nickname, then join the desktop you were invited to.
+  function renderNick(L, c) {
+    const who = (inviteInfo && inviteInfo.invitedBy) ? inviteInfo.invitedBy : 'someone';
+    centerText(L, L.blurbY, who + ' invited you to a shared desktop', c.fgDim);
+    centerText(L, L.emailLblY, inviteInfo && inviteInfo.email ? inviteInfo.email : '', c.fg);
+
+    engine.text(L.x, L.nameLblY, 'pick a nickname', { fg: c.accent, bold: true });
+    drawField(L, L.nameY, username, true, c, 'your name on the desktop');
+
+    const label = phase === 'verifying' ? '[ joining… ]' : '[ Join the desktop ]';
+    const bx = L.px + Math.floor((L.W - label.length) / 2);
+    engine.text(bx, L.btnY, label, { fg: focus === FIELD_BTN ? c.bg : c.accent, bg: focus === FIELD_BTN ? c.accent : undefined, bold: true });
+    layout.btn = { x: bx, y: L.btnY, w: label.length };
+
+    if (error) centerText(L, L.hintY, '✗ ' + error, c.error);
+    else centerText(L, L.hintY, 'type a nickname · Enter to join', c.fgDim);
   }
 
   function renderBusy(L, c, msg) {
@@ -243,6 +267,18 @@ export function createLogin(engine, opts = {}) {
 
   async function submit() {
     if (done || phase === 'sending' || phase === 'verifying') return;
+    if (phase === 'nick') {
+      if (username.trim().length < 2) { error = 'pick a nickname (2+ chars)'; focus = FIELD_NAME; return; }
+      error = ''; phase = 'verifying';
+      try {
+        const session = await auth.verify(pendingInviteToken, username.trim());
+        finishLogin(session.user);
+      } catch (e) {
+        phase = 'nick';
+        error = (e && e.message) || 'link expired — ask for a new invite';
+      }
+      return;
+    }
     if (phase === 'sent') { resetForm(); return; }
     if (!isEmail(email)) { error = 'enter a valid email'; focus = FIELD_EMAIL; return; }
     if (username.trim().length < 2) { error = 'pick a username (2+ chars)'; focus = FIELD_NAME; return; }
@@ -280,6 +316,19 @@ export function createLogin(engine, opts = {}) {
     try { onLogin(user); } catch (e) { console.error('onLogin', e); }
   }
 
+  // Enter via an invite link. Existing accounts go straight in; a brand-new
+  // invitee is shown the nickname step first (then verify on submit).
+  async function signInInvite(token, info) {
+    if (done) return null;
+    inviteInfo = info || null;
+    if (info && info.exists) return signIn(token);
+    pendingInviteToken = token;
+    username = (info && info.nick) || '';
+    phase = 'nick';
+    focus = FIELD_NAME;
+    return null;
+  }
+
   // No-email, local-only sign-in. Boots straight into a 'guest' namespace.
   function doGuest() {
     if (done || phase === 'verifying') return;
@@ -292,6 +341,8 @@ export function createLogin(engine, opts = {}) {
 
   function moveFocus(d) {
     if (phase === 'verifying') return;
+    // Invite nick screen: only the nickname field + Join button matter.
+    if (phase === 'nick') { focus = focus === FIELD_BTN ? FIELD_NAME : FIELD_BTN; error = ''; return; }
     // On the "sent" screen only the [different email] / guest buttons matter.
     if (phase === 'sent') { focus = focus === FIELD_GUEST ? FIELD_BTN : FIELD_GUEST; error = ''; return; }
     focus = (focus + d + FIELD_COUNT) % FIELD_COUNT;
@@ -374,5 +425,5 @@ export function createLogin(engine, opts = {}) {
     for (const off of offs) { try { off(); } catch {} }
   }
 
-  return { render, destroy, signIn };
+  return { render, destroy, signIn, signInInvite };
 }

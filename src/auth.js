@@ -58,12 +58,12 @@ export function getSession() {
     // A real session has a server token; a guest session has guest:true and no
     // token (local-only, never validated against the server).
     if (!s || !s.user || (!s.token && !s.guest)) return null;
-    return { token: s.token || null, guest: !!s.guest, at: s.at, user: decorate(s.user) };
+    return { token: s.token || null, guest: !!s.guest, room: s.room || null, at: s.at, user: decorate(s.user) };
   } catch { return null; }
 }
 
-export function saveSession(token, user) {
-  const s = { token, guest: false, user: decorate(user), at: Date.now() };
+export function saveSession(token, user, room) {
+  const s = { token, guest: false, user: decorate(user), room: room || null, at: Date.now() };
   try { localStorage.setItem(SESSION_KEY, JSON.stringify(s)); } catch {}
   return s;
 }
@@ -104,11 +104,20 @@ export function requestLink({ email, username } = {}) {
   });
 }
 
-// Exchange a single-use magic-link token for a long-lived session.
-export async function verify(token) {
-  const data = await postJSON('/verify', { token: String(token || '') });
+// Inspect a magic/invite token WITHOUT consuming it — lets the boot flow decide
+// whether to collect a nickname (new invited user) before verifying.
+// → { valid, invite, email, exists, nick, invitedBy }
+export async function peek(token) {
+  return postJSON('/peek', { token: String(token || '') });
+}
+
+// Exchange a single-use magic-link token for a long-lived session. `nick` seeds
+// a brand-new account only (existing users keep their name). Invite links carry
+// a room server-side; we persist it on the session so boot enters that desktop.
+export async function verify(token, nick) {
+  const data = await postJSON('/verify', { token: String(token || ''), nick: String(nick || '') });
   if (!data.token || !data.user) throw new Error('bad verify response');
-  return saveSession(data.token, data.user);
+  return saveSession(data.token, data.user, data.room || null);
 }
 
 // Revalidate the stored session against the server. Returns the (refreshed)
@@ -123,7 +132,7 @@ export async function refresh() {
     if (res.status === 401) { clearSession(); return null; }
     if (!res.ok) return s;
     const data = await res.json().catch(() => null);
-    if (data && data.user) return saveSession(s.token, data.user);
+    if (data && data.user) return saveSession(s.token, data.user, data.room != null ? data.room : s.room);
     return s;
   } catch { return s; }
 }

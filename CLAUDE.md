@@ -50,12 +50,14 @@ src/shell.js     desktop shell — wires engine+wm+apps, icons, taskbar, widgets
                  user chip + logout menu (opts.user / opts.onLogout / opts.storageKey)
 src/share.js     file-share client: DO room (local→DO→locals) over /api/share/*,
                  WS live sync + WebRTC tunnel (createShareClient / createTunnel)
+src/collab.js    collaborative-desktop client: email invite + presence WS
+                 (who's here + live cursors) over /api/collab/* (createCollabClient)
 src/apps/*.js    apps: terminal, snake, notes, paint, readme, findman,
                  mediamogul (Media House), gamemaker, share
 index.html       boots engine → login → shell (dynamic imports with ?v= cache-bust)
 bench.html       standalone perf benchmark
 worker/index.js  Cloudflare Worker entry: serves ASSETS, /api/auth/*, /api/share/*
-                 (ShareRoom Durable Object), /api/newfish/* proxy
+                 (ShareRoom DO), /api/collab/* (CollabRoom DO), /api/newfish/* proxy
 wrangler.jsonc   Cloudflare config (assets from repo root, no build)
 .claude/devserver.py   dev server with Cache-Control: no-store
 .claude/launch.json    preview config (python3 devserver.py 8765 0.0.0.0)
@@ -110,6 +112,19 @@ wrangler.jsonc   Cloudflare config (assets from repo root, no build)
   pure: fetch + WebSocket + RTCPeerConnection, no DOM) → app `src/apps/share.js`.
   Handoffs: `__aciiSharePath` (create+push a path; set by the file context menu's
   "Share…") and `__aciiShareJoin` / `?share=<code>` (join on open).
+- **Collaborative desktop (Durable Object):** a "room" is one owner's desktop,
+  keyed by the **owner's user id**. People are added by **email invite** (owner →
+  user-chip menu "Invite to desktop…" → worker emails a magic link carrying the
+  room). Opening it: `/api/auth/peek` (no consume) tells boot whether to show a
+  **nickname step** — shown ONLY for a brand-new email (registration only if new);
+  existing accounts go straight in. `verify` records membership in the `CollabRoom`
+  DO + persists `room` on the session, so boot enters that desktop. The DO holds
+  the member list + **live presence** (who's here + cursors) over a WebSocket.
+  Backend = `worker/index.js` `CollabRoom` DO (binding `COLLAB`, migration v2 in
+  `wrangler.jsonc`). Client = `src/collab.js` (`createCollabClient`, pure: fetch +
+  WebSocket). Shell consumes `opts.collab`/`canInvite`/`onInvite` → presence
+  overlay + invite. **Phase 1+2 (presence + invite/identity) only — shared FS /
+  window replication (phase 3) and co-editing CRDT (phase 4) are not built yet.**
 - **Colors:** read `ctx.theme.peek().colors.{accent,fg,fgDim,error,warning,success,link,border,borderFocus,bg}`.
   Never hardcode hex. `theme` is a signal — reading `.value` inside an effect
   subscribes; use `.peek()` in render loops.

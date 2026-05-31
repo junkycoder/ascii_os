@@ -33,6 +33,13 @@ const SHARE_CODE_ALPHABET = '23456789abcdefghjkmnpqrstuvwxyz'; // no look-alikes
 const SHARE_MAX_FILE = 256 * 1024;      // 256 KiB per file kept in the DO
 const SHARE_MAX_TOTAL = 8 * 1024 * 1024; // 8 MiB total per room (soft cap)
 
+// ── Collaborative desktop (Durable Object) ──────────────────────────
+// A "room" is one owner's shared desktop, keyed by the owner's user id. People
+// are added by email invite (a magic link carrying the room); on verify they
+// join the room and boot into it. The CollabRoom DO holds the member list and
+// the live presence (who's here + cursors) over a WebSocket.
+const COLLAB_INVITE_TTL = 60 * 60 * 24 * 7; // invite link valid 7 days, single use
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
@@ -40,6 +47,7 @@ export default {
 
     if (path.startsWith('/api/auth/')) return handleAuth(request, env, url);
     if (path.startsWith('/api/share/')) return handleShare(request, env, url);
+    if (path.startsWith('/api/collab/')) return handleCollab(request, env, url);
     if (path === '/.well-known/apple-app-site-association') return aasa(env);
     if (path === '/auth') return serveApp(request, env);          // universal-link landing
     if (path.startsWith(NEWFISH_PREFIX)) return proxyNewfish(request, url);
@@ -87,12 +95,47 @@ async function handleAuth(request, env, url) {
 
   if (route === 'request' && request.method === 'POST') return authRequest(request, env);
   if (route === 'verify' && request.method === 'POST') return authVerify(request, env);
+  if (route === 'peek' && request.method === 'POST') return authPeek(request, env);
   if (route === 'me' && request.method === 'GET') return authMe(request, env);
   return json({ error: 'not found' }, 404);
 }
 
 async function readJSON(request) {
   try { return await request.json(); } catch { return null; }
+}
+
+// Resolve a Bearer session token → the stored session record, or null.
+function bearer(request) {
+  const a = request.headers.get('authorization') || '';
+  return a.startsWith('Bearer ') ? a.slice(7).trim() : '';
+}
+async function sessionFor(env, sid) {
+  if (!sid) return null;
+  const raw = await env.AUTH.get('session:' + sid);
+  if (!raw) return null;
+  try { return JSON.parse(raw); } catch { return null; }
+}
+
+// POST /api/auth/peek { token } → inspect a magic/invite token WITHOUT consuming
+// it, so the client can decide whether to show a "pick a nickname" step. The
+// token holder is the person the link was emailed to, so it's fine to tell them
+// whether their address already has an account.
+async function authPeek(request, env) {
+  const body = await readJSON(request);
+  const token = String((body && body.token) || '').trim();
+  if (!token) return json({ error: 'missing token' }, 400);
+  const raw = await env.AUTH.get('magic:' + token);
+  if (!raw) return json({ ok: true, valid: false });
+  let m; try { m = JSON.parse(raw); } catch { return json({ ok: true, valid: false }); }
+  const exists = !!(await env.AUTH.get('user:' + m.email));
+  return json({
+    ok: true, valid: true,
+    invite: !!m.room,
+    email: m.email,
+    exists,
+    nick: m.username || null,
+    invitedBy: m.invitedBy || null,
+  });
 }
 
 // POST /api/auth/request { email, username } → email a one-time magic link.
@@ -124,11 +167,15 @@ async function authRequest(request, env) {
   return json({ ok: true });
 }
 
-// POST /api/auth/verify { token } → consume the magic link, upsert the user,
-// issue a long-lived session. { token, user }.
+// POST /api/auth/verify { token, nick? } → consume the magic link, upsert the
+// user, issue a long-lived session. For invite links the magic record carries a
+// `room` (+ rights): we record the membership and return the room so the client
+// boots into it. "Registration only if new": a nick (from the invite or this
+// request) seeds a BRAND-NEW account only — an existing user keeps their name.
 async function authVerify(request, env) {
   const body = await readJSON(request);
   const token = String((body && body.token) || '').trim();
+  const nick = String((body && body.nick) || '').trim().slice(0, 16);
   if (!token) return json({ error: 'missing token' }, 400);
 
   const raw = await env.AUTH.get('magic:' + token);
@@ -138,33 +185,52 @@ async function authVerify(request, env) {
   let m; try { m = JSON.parse(raw); } catch { return json({ error: 'bad token' }, 400); }
   const email = m.email;
   const id = 'u-' + (await sha256hex(email)).slice(0, 16);
+  const isInvite = !!m.room;
 
-  // Upsert the user record (keep created-at; refresh username if provided).
+  // Upsert the user record (keep created-at).
   const userKey = 'user:' + email;
   let user;
   const existing = await env.AUTH.get(userKey);
   if (existing) {
     try { user = JSON.parse(existing); } catch { user = null; }
   }
-  if (!user) user = { id, email, username: m.username || email.split('@')[0], createdAt: Date.now() };
-  else { user.id = id; if (m.username) user.username = m.username; }
+  if (!user) {
+    // New account → register with the chosen nick (request nick wins, then the
+    // invite-suggested nick, then the email local part).
+    user = { id, email, username: (nick || m.username || email.split('@')[0]).slice(0, 16), createdAt: Date.now() };
+  } else {
+    user.id = id;
+    // Existing account: don't re-register. Only a normal (non-invite) sign-in
+    // that supplies a username may refresh the display name.
+    if (m.username && !isInvite) user.username = m.username;
+  }
   await env.AUTH.put(userKey, JSON.stringify(user));
 
-  const sid = randToken();
-  await env.AUTH.put('session:' + sid, JSON.stringify({ id, email, username: user.username }), { expirationTtl: SESSION_TTL });
+  // Invite → join the owner's collaborative room and remember it on the session.
+  let room = null;
+  if (isInvite && env.COLLAB) {
+    room = m.room;
+    try {
+      const stub = env.COLLAB.get(env.COLLAB.idFromName(room));
+      await stub.fetch('https://collab/join', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ owner: room, userId: id, nick: user.username, rights: m.rights === 'read' ? 'read' : 'write' }),
+      });
+    } catch (_) { /* presence still works; membership best-effort */ }
+  }
 
-  return json({ token: sid, user: { id, email, name: user.username } });
+  const sid = randToken();
+  await env.AUTH.put('session:' + sid, JSON.stringify({ id, email, username: user.username, room }), { expirationTtl: SESSION_TTL });
+
+  return json({ token: sid, user: { id, email, name: user.username }, room });
 }
 
-// GET /api/auth/me  (Authorization: Bearer <sid>) → { user } or 401.
+// GET /api/auth/me  (Authorization: Bearer <sid>) → { user, room } or 401.
 async function authMe(request, env) {
-  const auth = request.headers.get('authorization') || '';
-  const sid = auth.startsWith('Bearer ') ? auth.slice(7).trim() : '';
-  if (!sid) return json({ error: 'no session' }, 401);
-  const raw = await env.AUTH.get('session:' + sid);
-  if (!raw) return json({ error: 'invalid session' }, 401);
-  let s; try { s = JSON.parse(raw); } catch { return json({ error: 'invalid session' }, 401); }
-  return json({ user: { id: s.id, email: s.email, name: s.username } });
+  const s = await sessionFor(env, bearer(request));
+  if (!s) return json({ error: 'invalid session' }, 401);
+  return json({ user: { id: s.id, email: s.email, name: s.username }, room: s.room || null });
 }
 
 // Send the magic link via Resend (https://resend.com). Requires a verified
@@ -381,6 +447,199 @@ export class ShareRoom {
       let pid; try { pid = (ws.deserializeAttachment() || {}).peerId; } catch { pid = null; }
       if (pid !== peerId) { try { ws.send(s); } catch {} }
     }
+  }
+}
+
+// ── /api/collab/* — collaborative desktop (Durable Object) ──────────
+// Routing model (a room is one owner's desktop, keyed by the owner's user id):
+//   POST /api/collab/invite              → owner invites an email (Bearer auth)
+//   GET  /api/collab/<room>/members?t=…  → member list (session token)
+//   GET  /api/collab/<room>/ws?t=…       → live presence (who's here + cursors)
+async function handleCollab(request, env, url) {
+  if (!env.COLLAB) return json({ error: 'collab not configured' }, 500);
+
+  const rest = url.pathname.slice('/api/collab/'.length);
+  if (rest === 'invite' && request.method === 'POST') return collabInvite(request, env, url);
+
+  const slash = rest.indexOf('/');
+  const room = slash < 0 ? rest : rest.slice(0, slash);
+  const action = slash < 0 ? '' : rest.slice(slash + 1);
+  if (!room || !action) return json({ error: 'not found' }, 404);
+
+  // Identify the caller from the session token in ?t= (WebSocket can't send an
+  // Authorization header). The DO renders presence from this identity.
+  const sid = url.searchParams.get('t') || bearer(request);
+  const sess = await sessionFor(env, sid);
+  if (!sess) return json({ error: 'unauthorized' }, 401);
+
+  // Pass the verified identity to the DO via query params (robust across the
+  // WebSocket upgrade — no header mutation on the forwarded request).
+  const doUrl = new URL('https://collab/' + action);
+  for (const [k, v] of url.searchParams) doUrl.searchParams.set(k, v);
+  doUrl.searchParams.set('uid', sess.id);
+  doUrl.searchParams.set('nick', sess.username || '');
+  doUrl.searchParams.set('owner', room);
+  const stub = env.COLLAB.get(env.COLLAB.idFromName(room));
+  return stub.fetch(new Request(doUrl.toString(), request));
+}
+
+// POST /api/collab/invite { email, nick?, rights? } (Bearer <session>) → email a
+// magic link that joins the caller's room. Only the owner can invite to it.
+async function collabInvite(request, env, url) {
+  const sess = await sessionFor(env, bearer(request));
+  if (!sess) return json({ error: 'sign in to invite' }, 401);
+
+  const body = await readJSON(request);
+  const email = String((body && body.email) || '').trim().toLowerCase();
+  const nick = String((body && body.nick) || '').trim().slice(0, 16);
+  const rights = (body && body.rights) === 'read' ? 'read' : 'write';
+  if (!isEmail(email)) return json({ error: 'invalid email' }, 400);
+
+  const room = sess.id; // the owner's room IS their user id
+  const token = randToken();
+  await env.AUTH.put('magic:' + token, JSON.stringify({
+    email, username: nick || undefined, room, rights, invitedBy: sess.username || '',
+  }), { expirationTtl: COLLAB_INVITE_TTL });
+
+  const origin = env.APP_URL || new URL(request.url).origin;
+  const link = origin.replace(/\/$/, '') + '/auth?token=' + token;
+  try {
+    await sendInviteEmail(env, email, link, sess.username || 'someone');
+  } catch (e) {
+    return json({ error: 'could not send invite: ' + (e && e.message || e) }, 502);
+  }
+  return json({ ok: true });
+}
+
+// The CollabRoom Durable Object — one instance per owner's desktop. Holds the
+// member list (persisted) and the live presence: who is connected and where
+// their cursor is. Presence is ephemeral (in-memory + WS), the roster persists.
+export class CollabRoom {
+  constructor(state, env) {
+    this.state = state;
+    this.env = env;
+    this.cursors = new Map(); // userId -> { x, y }  (ephemeral)
+  }
+
+  async fetch(request) {
+    const url = new URL(request.url);
+    const action = url.pathname.split('/').filter(Boolean)[0] || '';
+    if (action === 'join') return this.join(request);
+    if (action === 'members') return this.members();
+    if (action === 'ws') return this.handleWs(request);
+    return json({ error: 'not found' }, 404);
+  }
+
+  async join(request) {
+    const b = await request.json().catch(() => null);
+    if (!b || !b.userId) return json({ error: 'bad join' }, 400);
+    if (b.owner && !(await this.state.storage.get('owner'))) {
+      await this.state.storage.put('owner', b.owner);
+    }
+    await this.state.storage.put('member:' + b.userId, {
+      userId: b.userId, nick: b.nick || 'guest',
+      rights: b.rights === 'read' ? 'read' : 'write',
+      joinedAt: Date.now(),
+    });
+    return json({ ok: true });
+  }
+
+  async members() {
+    const owner = (await this.state.storage.get('owner')) || null;
+    const map = await this.state.storage.list({ prefix: 'member:' });
+    const members = [];
+    for (const v of map.values()) members.push({ ...v, role: v.userId === owner ? 'owner' : 'host' });
+    return json({ owner, members });
+  }
+
+  // Live presence socket. The worker has stamped the verified identity onto the
+  // request headers; we attach it to the socket and broadcast the roster.
+  async handleWs(request) {
+    if (request.headers.get('upgrade') !== 'websocket') {
+      return new Response('expected websocket', { status: 426 });
+    }
+    const q = new URL(request.url).searchParams;
+    const userId = q.get('uid') || '';
+    const nick = (q.get('nick') || '') || 'guest';
+    const owner = q.get('owner') || (await this.state.storage.get('owner')) || '';
+    if (owner && !(await this.state.storage.get('owner'))) await this.state.storage.put('owner', owner);
+    const role = userId === owner ? 'owner' : 'host';
+
+    const pair = new WebSocketPair();
+    const client = pair[0], server = pair[1];
+    this.state.acceptWebSocket(server);
+    server.serializeAttachment({ userId, nick, role });
+    server.send(JSON.stringify({ type: 'hello', you: { userId, nick, role }, roster: this.roster() }));
+    this.broadcastExcept(userId, { type: 'roster', roster: this.roster() });
+    return new Response(null, { status: 101, webSocket: client });
+  }
+
+  roster() {
+    const seen = new Map();
+    for (const ws of this.state.getWebSockets()) {
+      let a; try { a = ws.deserializeAttachment(); } catch { a = null; }
+      if (!a || !a.userId) continue;
+      const cur = this.cursors.get(a.userId);
+      seen.set(a.userId, { userId: a.userId, nick: a.nick, role: a.role, x: cur ? cur.x : null, y: cur ? cur.y : null });
+    }
+    return [...seen.values()];
+  }
+
+  async webSocketMessage(ws, message) {
+    let m; try { m = JSON.parse(message); } catch { return; }
+    let a; try { a = ws.deserializeAttachment(); } catch { a = null; }
+    if (!a) return;
+    if (m.type === 'cursor') {
+      this.cursors.set(a.userId, { x: m.x, y: m.y });
+      this.broadcastExcept(a.userId, { type: 'cursor', userId: a.userId, nick: a.nick, role: a.role, x: m.x, y: m.y });
+    }
+  }
+
+  webSocketClose(ws) {
+    let a; try { a = ws.deserializeAttachment(); } catch { a = null; }
+    if (a) { this.cursors.delete(a.userId); this.broadcast({ type: 'roster', roster: this.roster() }); }
+  }
+  webSocketError(ws) { this.webSocketClose(ws); }
+
+  broadcast(obj) {
+    const s = JSON.stringify(obj);
+    for (const ws of this.state.getWebSockets()) { try { ws.send(s); } catch {} }
+  }
+  broadcastExcept(userId, obj) {
+    const s = JSON.stringify(obj);
+    for (const ws of this.state.getWebSockets()) {
+      let a; try { a = ws.deserializeAttachment(); } catch { a = null; }
+      if (!a || a.userId !== userId) { try { ws.send(s); } catch {} }
+    }
+  }
+}
+
+// Invite email (Resend) — tells the recipient who invited them into a desktop.
+async function sendInviteEmail(env, email, link, inviter) {
+  if (!env.RESEND_API_KEY) throw new Error('mail not configured');
+  const from = env.MAIL_FROM || 'FakanOS <login@fakan.cz>';
+  const who = String(inviter || 'someone').slice(0, 40);
+  const subject = who + ' invited you to a FakanOS desktop';
+  const text =
+    who + ' invited you to share a desktop on FakanOS.\n\n' +
+    'Open this link to join (valid 7 days):\n' + link + '\n\n' +
+    'If this seems unexpected, you can ignore this email.';
+  const html =
+    '<div style="font-family:ui-monospace,Menlo,monospace;background:#0d0d0d;color:#ddd;padding:32px">' +
+    '<div style="color:#00ff88;font-size:20px;font-weight:bold;letter-spacing:2px">F a k a n O S</div>' +
+    '<p style="color:#bbb"><b>' + who + '</b> invited you to share a desktop. Open the link to join — you can pick a nickname on the way in.</p>' +
+    '<p><a href="' + link + '" style="display:inline-block;background:#00ff88;color:#0d0d0d;padding:12px 20px;border-radius:6px;text-decoration:none;font-weight:bold">Join the desktop →</a></p>' +
+    '<p style="color:#777;font-size:12px;word-break:break-all">' + link + '</p>' +
+    '<p style="color:#555;font-size:12px">If this seems unexpected, ignore this email.</p>' +
+    '</div>';
+  const res = await fetch('https://api.resend.com/emails', {
+    method: 'POST',
+    headers: { authorization: 'Bearer ' + env.RESEND_API_KEY, 'content-type': 'application/json' },
+    body: JSON.stringify({ from, to: [email], subject, text, html }),
+  });
+  if (!res.ok) {
+    const detail = await res.text().catch(() => '');
+    throw new Error('resend ' + res.status + ' ' + detail.slice(0, 200));
   }
 }
 
