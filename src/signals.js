@@ -27,20 +27,47 @@ export function signal(initial) {
   };
 }
 
+const EFFECT_DEPTH_LIMIT = 100;
+let effectDepth = 0;
+
 export function effect(fn) {
   const run = () => {
+    if (effectDepth >= EFFECT_DEPTH_LIMIT) {
+      console.error('[signals] effect re-entrancy limit reached — possible cycle (effect → set signal → effect). Aborting.');
+      return;
+    }
     const prev = currentEffect;
     currentEffect = run;
-    try { fn(); } finally { currentEffect = prev; }
+    effectDepth++;
+    try { fn(); }
+    catch (err) { console.error('[signals] effect threw:', err); }
+    finally { currentEffect = prev; effectDepth--; }
   };
   run();
   return run;
 }
 
 export function computed(fn) {
-  const s = signal(undefined);
-  effect(() => { s.value = fn(); });
-  return { get value() { return s.value; }, peek: s.peek };
+  let value;
+  let dirty = true;
+  const s = signal(undefined); // notifies .value subscribers when deps change
+  // Eager effect: tracks deps; on dep change it marks dirty and bumps the
+  // inner signal so .value readers get notified. It does NOT recompute here.
+  effect(() => { fn(); dirty = true; s.value = (s.peek() || 0) + 1; });
+  dirty = true; // first read recomputes
+  const recompute = () => {
+    if (dirty) {
+      const prev = currentEffect;
+      currentEffect = null; // recompute without subscribing the reader to deps
+      try { value = fn(); } finally { currentEffect = prev; }
+      dirty = false;
+    }
+    return value;
+  };
+  return {
+    get value() { const v = recompute(); s.value; return v; }, // subscribe reader
+    peek() { return recompute(); },
+  };
 }
 
 export function batch(fn) {
