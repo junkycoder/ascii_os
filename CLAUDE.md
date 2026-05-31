@@ -36,6 +36,7 @@ src/vim.js       reusable modal vim engine over a text buffer (pure logic, no DO
 src/drafts.js    draft / auto-backup store (last unsaved edit per path)
 src/user.js      system user + preferences (vimEnabled, quicklook, …)
 src/keymap.js    global leader-key scheme + Quick-Look routing (pure logic)
+src/keyboard.js  on-screen touch keyboard (pure logic: layouts/state/hitTest/press)
 src/fs.js        virtual FS (in-memory + localStorage + File System Access mounts)
 src/auth.js      email + magic-link sign-in, session, per-user storage keys
                  (client side of worker /api/auth/*); replaces the old users.js
