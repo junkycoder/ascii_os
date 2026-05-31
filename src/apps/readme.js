@@ -83,6 +83,10 @@ export function createApp(initialCtx, win) {
   });
 
   return {
+    // Pure reading view — fully navigable by swipe (scroll) and tap (links),
+    // so the on-screen keyboard isn't needed; hiding it frees the screen on
+    // touch. (Arrow / PageUp-Down / wheel still work when a keyboard exists.)
+    wantsKeyboard() { return false; },
     render(ctx) {
       md.render(ctx);
     },

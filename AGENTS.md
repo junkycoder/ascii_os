@@ -88,6 +88,11 @@ export function createApp(initialCtx, win) {
   area.
 - Apps **do not** subscribe to engine input and **do not** call
   `engine.clear()` / `engine.start()` — the shell drives all of that.
+- Optional `wantsKeyboard()`: on touch the shell shows the on-screen keyboard
+  whenever a window is focused. Export `wantsKeyboard()` → `false` to hide it
+  while no text field is active (e.g. a pure reading/gesture view like
+  `readme`). Omit it (or return `true`) for any app that drives navigation /
+  actions from keys (arrows, vim `hjkl`, paint brush digits).
 - Read colors from the theme, never hardcode hex:
   `ctx.theme.peek().colors.{accent,fg,fgDim,error,warning,success,link,border,borderFocus,bg}`.
 

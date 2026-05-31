@@ -87,9 +87,16 @@ Drž vzor projektu: **pure-logic modul + integrace v shellu** (jako `vim.js` /
   (runtime `Date.now()` je v browseru OK; viz CLAUDE.md).
 - **Feedback:** krátké vizuální zvýraznění stisknuté klávesy (1–2 frame invert).
   Žádný zvuk.
-- **Skrytí:** klávesnice je vidět jen když má fokus appka, která žádá text
-  (zatím: vždy když je `keyboardEnabled` a je fokusované okno; v budoucnu může
-  appka deklarovat `wantsKeyboard`). Toggle i ručně — leader/zkratka + ikona.
+- **Skrytí:** klávesnice je vidět jen když má fokus appka, která žádá text:
+  default je „vždy když je `keyboardEnabled` a je fokusované okno". Appka může
+  vystavit `wantsKeyboard()` → `false` a klávesnici tak schovat, dokud nemá
+  aktivní textové pole (např. čistě čtecí/gesturový `readme`). Apps bez metody
+  (nebo s `true`) klávesnici drží — důležité pro key-driven ovládání (šipky,
+  vim `hjkl`, čísla štětců v Paintu). Toggle i ručně — leader/zkratka.
+- **Velikost na dotyku:** na touch režimech (`watch`/`mobile`/`tablet`) jsou
+  klávesy 2 grid-řádky vysoké (mezi řadami 1 řádek mezery), aby se daly
+  pohodlně trefit; `desktop`/`tv` (fyzická klávesnice) drží štíhlé 1řádkové
+  klávesy. Výšku řídí `opts.rowHeight` (číslo nebo funkce) v `createKeyboard`.
 
 ---
 

@@ -992,8 +992,19 @@ export function createShell(engine, opts = {}) {
   // ── On-screen keyboard helpers ──────────────────────────────────
   // Visible only while an app window is focused (so the desktop stays clear);
   // a swipe-down dismisses it until focus changes (the effect below clears it).
+  // A focused app may opt into focus-aware behavior by exposing wantsKeyboard()
+  // → return false to hide the keyboard while no text field is active (e.g. an
+  // editor in navigation mode). Apps without the method keep showing it whenever
+  // focused, so keys-as-controls apps (snake arrows, paint) keep their input.
   function keyboardVisible() {
-    return keyboardEnabled.peek() && !kbHidden && !!wm.focused.peek();
+    if (!keyboardEnabled.peek() || kbHidden) return false;
+    const f = wm.focused.peek();
+    if (!f) return false;
+    const inst = running.get(f.id)?.instance;
+    if (inst && typeof inst.wantsKeyboard === 'function') {
+      try { return !!inst.wantsKeyboard(); } catch { return true; }
+    }
+    return true;
   }
   // Rows the keyboard reserves at the bottom whenever it's enabled, so windows
   // never sit under it (computed regardless of current focus for stable sizing).

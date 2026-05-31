@@ -67,6 +67,12 @@ wrangler.jsonc   Cloudflare config (assets from repo root, no build)
   LOCAL to the window content area. Apps DON'T subscribe to engine input — the
   shell routes events to the focused app's handlers. Apps DON'T call
   `engine.clear()` / `engine.start()`.
+  - **Optional `wantsKeyboard()`:** on touch the shell shows the on-screen
+    keyboard whenever a window is focused. An app may export `wantsKeyboard()`
+    → return `false` to hide it while no text field is active (e.g. a pure
+    reading/gesture view like `readme`). Omit it and the keyboard stays shown —
+    keep it omitted (or `true`) for any app that drives navigation/actions from
+    keys (arrows, vim `hjkl`, paint brush digits).
 - **Shared singletons** (use these EXACT lines wherever needed, so every app
   shares one instance):
   - `const fs = globalThis.__aciiFS ||= createFS({ storageKey: 'acii.fs.v1' });`
