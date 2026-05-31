@@ -102,6 +102,7 @@ async function authRequest(request, env) {
   const body = await readJSON(request);
   const email = String((body && body.email) || '').trim().toLowerCase();
   const username = String((body && body.username) || '').trim().slice(0, 16);
+  const target = String((body && body.target) || '').trim();
   if (!isEmail(email)) return json({ error: 'invalid email' }, 400);
   if (username.length < 2) return json({ error: 'invalid username' }, 400);
 
@@ -114,7 +115,10 @@ async function authRequest(request, env) {
   await env.AUTH.put(rlKey, '1', { expirationTtl: REQUEST_THROTTLE });
 
   const origin = env.APP_URL || new URL(request.url).origin;
-  const link = origin.replace(/\/$/, '') + '/auth?token=' + token;
+  // Requested from the native app → tag the link so the landing page hands the
+  // token to the app via the fakanos:// scheme if the universal link misses.
+  let link = origin.replace(/\/$/, '') + '/auth?token=' + token;
+  if (target === 'app') link += '&target=app';
 
   try {
     await sendMagicEmail(env, email, link);

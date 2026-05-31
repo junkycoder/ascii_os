@@ -97,10 +97,13 @@ async function postJSON(path, body) {
 
 // Ask the server to email a magic link. Resolves on accepted (does NOT mean the
 // address exists — the server never leaks that). Throws on a bad request.
-export function requestLink({ email, username } = {}) {
+export function requestLink({ email, username, target } = {}) {
   return postJSON('/request', {
     email: String(email || '').trim().toLowerCase(),
     username: String(username || '').trim(),
+    // 'app' → the worker tags the magic link with &target=app so the landing
+    // page can bounce the token into the native app. Omitted for web sign-in.
+    target: target === 'app' ? 'app' : undefined,
   });
 }
 

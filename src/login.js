@@ -22,6 +22,7 @@
 import * as auth from './auth.js';
 import { createKeyboard } from './keyboard.js';
 import userPrefs from './user.js';
+import { isNative } from './mobile.js';
 
 const FIELD_EMAIL = 0;
 const FIELD_NAME = 1;
@@ -249,7 +250,10 @@ export function createLogin(engine, opts = {}) {
     error = '';
     phase = 'sending';
     try {
-      await auth.requestLink({ email, username });
+      // When the request comes from the native app, tag the magic link so the
+      // landing page can hand the token back to the app (custom scheme) even if
+      // the universal link doesn't fire. Plain web → no tag, web sign-in.
+      await auth.requestLink({ email, username, target: isNative() ? 'app' : undefined });
       phase = 'sent';
     } catch (e) {
       phase = 'form';
