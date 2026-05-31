@@ -364,7 +364,13 @@ export function createShell(engine, opts = {}) {
   const wm = createWindowManager(engine);
 
   // ── On-screen keyboard (touch) ──────────────────────────────────
-  const keyboard = createKeyboard();
+  // Touch devices get taller (2-row) keys so they're comfortable to tap;
+  // desktop/tv (physical keyboard, rarely shown) keep slim 1-row keys.
+  const kbRowHeight = () => {
+    const m = engine.mode.peek();
+    return (m === 'desktop' || m === 'tv') ? 1 : 2;
+  };
+  const keyboard = createKeyboard({ rowHeight: kbRowHeight });
   const keyboardEnabled = signal(!!userPrefs.get('keyboardEnabled'));
   userPrefs.subscribe(() => { keyboardEnabled.value = !!userPrefs.get('keyboardEnabled'); });
   let kbHidden = false; // transient per-focus dismissal (swipe down on the keyboard)
@@ -1064,8 +1070,19 @@ export function createShell(engine, opts = {}) {
   // ── On-screen keyboard helpers ──────────────────────────────────
   // Visible only while an app window is focused (so the desktop stays clear);
   // a swipe-down dismisses it until focus changes (the effect below clears it).
+  // A focused app may opt into focus-aware behavior by exposing wantsKeyboard()
+  // → return false to hide the keyboard while no text field is active (e.g. an
+  // editor in navigation mode). Apps without the method keep showing it whenever
+  // focused, so keys-as-controls apps (snake arrows, paint) keep their input.
   function keyboardVisible() {
-    return keyboardEnabled.peek() && !kbHidden && !!wm.focused.peek();
+    if (!keyboardEnabled.peek() || kbHidden) return false;
+    const f = wm.focused.peek();
+    if (!f) return false;
+    const inst = running.get(f.id)?.instance;
+    if (inst && typeof inst.wantsKeyboard === 'function') {
+      try { return !!inst.wantsKeyboard(); } catch { return true; }
+    }
+    return true;
   }
   // Rows the keyboard reserves at the bottom whenever it's enabled, so windows
   // never sit under it (computed regardless of current focus for stable sizing).
@@ -1104,16 +1121,21 @@ export function createShell(engine, opts = {}) {
     if (top < 0) return;
     const c = engine.theme.peek().colors;
     engine.rect(0, top, cols, lay.height, { ch: ' ', bg: c.bg });
+    // Key faces fill the row height; when keys are >1 row tall we leave the
+    // bottom row as background so adjacent rows read as separate keys.
+    const rh = lay.rowHeight || 1;
+    const faceH = rh > 1 ? rh - 1 : 1;
     for (const row of lay.rows) {
       const ry = top + row.y;
       for (const k of row.keys) {
         const on = k.active;
         const face = on ? c.accent : c.border;
         const fg = on ? c.bg : c.fg;
-        engine.rect(k.x, ry, k.w, 1, { ch: ' ', bg: face });
+        engine.rect(k.x, ry, k.w, faceH, { ch: ' ', bg: face });
         const label = String(k.label).slice(0, k.w);
         const lx = k.x + Math.max(0, Math.floor((k.w - label.length) / 2));
-        engine.text(lx, ry, label, { fg, bg: face, bold: on });
+        const ly = ry + Math.floor((faceH - 1) / 2);
+        engine.text(lx, ly, label, { fg, bg: face, bold: on });
       }
     }
   }
@@ -1201,6 +1223,7 @@ export function createShell(engine, opts = {}) {
       x, y,
       items: [
         { label: 'Open',           onSelect: () => openFile(path), hotkey: 'O' },
+        { label: 'Share…',         onSelect: () => { globalThis.__aciiSharePath = path; openOrFocus('share'); }, hotkey: 'S' },
         { label: isWp ? 'Remove wallpaper' : 'Set as wallpaper',
           onSelect: () => isWp ? clearWallpaper() : setWallpaper(path), hotkey: 'W' },
         { type: 'separator' },

@@ -193,6 +193,7 @@
         { createApp: createGameMaker },
         { createApp: createTimetrack },
         { createApp: createGitDesk },
+        { createApp: createShare },
       ] = await Promise.all([
         import('./src/shell.js' + V),
         import('./src/apps/terminal.js' + V),
@@ -205,6 +206,7 @@
         import('./src/apps/gamemaker.js' + V),
         import('./src/apps/timetrack.js' + V),
         import('./src/apps/gitdesk.js' + V),
+        import('./src/apps/share.js' + V),
       ]);
 
       const appRegistry = [
@@ -217,6 +219,7 @@
         { id: 'mediamogul',label: 'Media House',icon: '[▶]', factory: createMediaMogul },
         { id: 'gamemaker', label: 'GameMaker', icon: '[♛]', factory: createGameMaker },
         { id: 'timetrack', label: 'Time',      icon: '[◷]', factory: createTimetrack },
+        { id: 'share',     label: 'Share',     icon: '[⇄]', factory: createShare },
         { id: 'snake',     label: 'Snake',     icon: '[●]', factory: createSnake },
       ];
 
@@ -231,8 +234,14 @@
 
       const offFrame = engine.onFrame(() => shell.render());
 
-      // First-run for this user: open README so there's something to read.
-      if (shell.running.size === 0) {
+      // A shared link (/?share=<code>) opens straight into the Share app to join.
+      let shareCode = null;
+      try { shareCode = new URLSearchParams(location.search).get('share'); } catch (_) {}
+      if (shareCode) {
+        globalThis.__aciiShareJoin = shareCode;
+        setTimeout(() => shell.openApp('share'), 50);
+      } else if (shell.running.size === 0) {
+        // First-run for this user: open README so there's something to read.
         setTimeout(() => shell.openApp('readme'), 50);
       }
 

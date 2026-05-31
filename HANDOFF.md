@@ -84,6 +84,12 @@ Verified functional end-to-end:
     Findman-style tree filtered to video/image/audio + ASCII rendering of the
     selection + link to the original. No URL prompt, no editing.
   - **gamemaker** — grid editor + play mode (player/wall/goal/enemy), persisted.
+  - **share** — Durable-Object file share (local→DO→locals). Create a room
+    (you're the source) or join by code; small files (≤256 KiB) live in the
+    per-code `ShareRoom` DO and sync **live over a WebSocket**; bigger files go
+    peer-to-peer over a **WebRTC tunnel** the same socket signals for. Pulls land
+    in `/share/<code>/`. File context menu → "Share…" pushes a path; a
+    `/?share=<code>` link opens straight into join.
   - **gitdesk** (label **"Git Desk"**) — GitHub-Desktop-style client for the
     in-browser git engine (`src/git.js`). Branch bar (click ⎇ chip → branch
     menu: switch / new branch), **Changes** tab (file list with stage ☑/☐
@@ -134,6 +140,24 @@ menu, or spacebar (Quick-Look) on the selection.
   4.x pinned). Manual: `npx wrangler deploy`.
 - **iOS (Capacitor)** — `cz.fakan.os`. `src/mobile.js` integrates natively and
   no-ops in a plain browser; safe-area handled in `index.html`. See `CAPACITOR.md`.
+
+### File share (Durable Object) — code landed, needs a live deploy
+
+- **Backend:** `worker/index.js` exports the `ShareRoom` Durable Object; routes
+  under `/api/share/*` (`new` mints a code; `<code>/manifest|file|ws`). Bound as
+  `SHARE` with a **SQLite DO migration** in `wrangler.jsonc`
+  (`new_sqlite_classes: ["ShareRoom"]`). Limits: `SHARE_MAX_FILE` 256 KiB/file,
+  `SHARE_MAX_TOTAL` 8 MiB/room.
+- **Client:** `src/share.js` (`createShareClient` + `createTunnel`) + app
+  `src/apps/share.js`. Wired into `index.html` (import + registry) and the shell
+  file context menu ("Share…").
+- **Deploy prerequisite:** the DO migration applies on first `wrangler deploy` /
+  `trunk` push. Durable Objects need a plan that allows them (SQLite-backed DOs
+  are available on the free plan; confirm the account is enabled). The python
+  devserver can't run the worker — exercise via `wrangler dev` or a `trunk`
+  deploy. **Not yet verified end-to-end against a live DO.**
+- **Tunnel:** WebRTC data-channel transfer is implemented (chunked, backpressure)
+  using STUN only; symmetric-NAT peers may need a TURN server later.
 
 ## OPEN / next priorities
 

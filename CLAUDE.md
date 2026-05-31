@@ -48,11 +48,14 @@ src/mobile.js    Capacitor native integration, browser-safe (no-op in browser)
 src/shell.js     desktop shell — wires engine+wm+apps, icons, taskbar, widgets,
                  wallpaper, context menus, file drop, keymap, input routing;
                  user chip + logout menu (opts.user / opts.onLogout / opts.storageKey)
+src/share.js     file-share client: DO room (local→DO→locals) over /api/share/*,
+                 WS live sync + WebRTC tunnel (createShareClient / createTunnel)
 src/apps/*.js    apps: terminal, snake, notes, paint, readme, findman,
-                 mediamogul (Media House), gamemaker
+                 mediamogul (Media House), gamemaker, share
 index.html       boots engine → login → shell (dynamic imports with ?v= cache-bust)
 bench.html       standalone perf benchmark
-worker/index.js  Cloudflare Worker entry (serves ASSETS; /api/* lands here later)
+worker/index.js  Cloudflare Worker entry: serves ASSETS, /api/auth/*, /api/share/*
+                 (ShareRoom Durable Object), /api/newfish/* proxy
 wrangler.jsonc   Cloudflare config (assets from repo root, no build)
 .claude/devserver.py   dev server with Cache-Control: no-store
 .claude/launch.json    preview config (python3 devserver.py 8765 0.0.0.0)
@@ -67,6 +70,12 @@ wrangler.jsonc   Cloudflare config (assets from repo root, no build)
   LOCAL to the window content area. Apps DON'T subscribe to engine input — the
   shell routes events to the focused app's handlers. Apps DON'T call
   `engine.clear()` / `engine.start()`.
+  - **Optional `wantsKeyboard()`:** on touch the shell shows the on-screen
+    keyboard whenever a window is focused. An app may export `wantsKeyboard()`
+    → return `false` to hide it while no text field is active (e.g. a pure
+    reading/gesture view like `readme`). Omit it and the keyboard stays shown —
+    keep it omitted (or `true`) for any app that drives navigation/actions from
+    keys (arrows, vim `hjkl`, paint brush digits).
 - **Shared singletons** (use these EXACT lines wherever needed, so every app
   shares one instance):
   - `const fs = globalThis.__aciiFS ||= createFS({ storageKey: 'acii.fs.v1' });`
@@ -90,6 +99,17 @@ wrangler.jsonc   Cloudflare config (assets from repo root, no build)
   exercise auth via `wrangler dev` or a `trunk` deploy.
 - **Open-a-file handoff:** shell sets `globalThis.__aciiOpenFile = path` then
   focuses the target app; the app picks it up on first render and clears it.
+- **File share (Durable Object):** a "room" is keyed by an unguessable code (the
+  code IS the capability — no auth). Source local PUTs small files (≤256 KiB,
+  `SHARE_MAX_FILE`) into the per-code `ShareRoom` DO; other locals join by code,
+  pull the manifest, and stream files into `/share/<code>/`. A WebSocket carries
+  live `added/updated/deleted` events AND relays WebRTC signaling so peers open a
+  direct data-channel **tunnel** for files too big for the DO. Backend =
+  `worker/index.js` `ShareRoom` DO (binding `SHARE`, SQLite migration in
+  `wrangler.jsonc`). Client = `src/share.js` (`createShareClient` + `createTunnel`,
+  pure: fetch + WebSocket + RTCPeerConnection, no DOM) → app `src/apps/share.js`.
+  Handoffs: `__aciiSharePath` (create+push a path; set by the file context menu's
+  "Share…") and `__aciiShareJoin` / `?share=<code>` (join on open).
 - **Colors:** read `ctx.theme.peek().colors.{accent,fg,fgDim,error,warning,success,link,border,borderFocus,bg}`.
   Never hardcode hex. `theme` is a signal — reading `.value` inside an effect
   subscribes; use `.peek()` in render loops.
